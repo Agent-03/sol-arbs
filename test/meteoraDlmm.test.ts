@@ -303,3 +303,54 @@ test('C3D.4.2 stuck SDK bin-array recovery cannot block routine account refresh'
   assert.equal(snap.ready,1,'old verified window remains usable');
  }finally{mon.stop();await feed.stop()}
 });
+
+test('C3D.4.3 does not run expensive SDK reindex on a fixed 30-second timer',async()=>{
+ const sol=new PublicKey(GRAPH_ASSETS.SOL.mint),token=new PublicKey(pk(120));
+ const owner=new PublicKey(METEORA_DLMM);
+ const address=pk(36),x=pk(66),y=pk(96);
+ const info=(data:number):AccountInfo<Buffer>=>({
+  owner,data:Buffer.from([data]),lamports:1,executable:false,rentEpoch:0
+ });
+ const rpc={
+  getMultipleAccountsInfoAndContext:async(keys:PublicKey[])=>({
+   context:{slot:100},value:keys.map(key=>info(key.toBase58()===address?5:2))
+  })
+ } as unknown as Connection;
+ const feed=new MarketDataFeed(rpc);
+ const mon=new MeteoraDlmmMonitor(rpc,feed,{
+  enabled:true,maxPools:1,maxAgeMs:15000,maxSlotSkew:12,
+  refreshMs:8000,concurrency:1,minLiquidityUsd:2500,maxArraysPerSide:3,
+  refreshBudget:1,refreshConcurrency:1,bootstrapConcurrency:1,
+  rpcDeadlineMs:1500,reindexDeadlineMs:1000,reindexConcurrency:1
+ },()=>{});
+ const entries=(mon as unknown as {entries:Map<string,unknown>}).entries;
+ const candidates=(mon as unknown as {candidates:unknown[]}).candidates;
+ let reindexes=0;
+ const candidate={address,mintA:sol.toBase58(),mintB:token.toBase58(),liquidityUsd:50000};
+ entries.set(address,{candidate,sdk:{
+  lbPair:{tokenXMint:sol,tokenYMint:token,activeId:5},
+  tokenX:{publicKey:sol},tokenY:{publicKey:token},
+  program:{coder:{accounts:{decode:(type:string,data:Buffer)=>type==='lbPair'?
+   {tokenXMint:sol,tokenYMint:token,activeId:data[0]}:{lbPair:new PublicKey(address)}}}},
+  getBinArrayForSwap:async()=>{reindexes++;return []},
+  binArrayBitmapExtension:null
+ },binX:[x],binY:[y],bitmap:null,releases:new Map(),
+  lastReindexAt:Date.now()-180000,windowBinIndex:0,refreshFailures:0});
+ candidates.push(candidate);
+ mon.start();
+ try{
+  await mon.refresh();
+  assert.equal(mon.snapshot().ready,1);
+  assert.equal(reindexes,0,'old reindex timestamp alone is not a reason to call SDK');
+  assert.equal(mon.snapshot().reindexAttempts,0);
+  assert.equal(mon.snapshot().periodicReindexesRemoved,true);
+  // Active ID moves across array boundary (each array = 70 bins).
+  feed.ingest(address,info(75),101,'websocket');
+  await mon.refresh();
+  assert.equal(mon.snapshot().windowShiftReindexes,1);
+  assert.equal(reindexes,0,'the refresh records the new window before next recovery tick');
+  await mon.refresh();
+  assert.equal(mon.snapshot().reindexAttempts,1);
+  assert.ok(reindexes>0,'SDK recovery is requested only after a real bin-window change');
+ }finally{mon.stop();await feed.stop()}
+});
