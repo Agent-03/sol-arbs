@@ -26,6 +26,7 @@ export type LocalPricingHealth={
  trackedPools:number;readyPools:number;preparedPools:number;
  bootstrapReads:number;localCalculations:number;localErrors:number;
  unsupportedPools:number;lastLocalAt?:string;
+ validatedAgainstSdk:number;validationMismatches:number;
  errors:string[];
 };
 
@@ -61,6 +62,7 @@ export class LocalWhirlpoolQuoter{
  private bootstrapReads=0;private localCalculations=0;private localErrors=0;
  private unsupportedPools=0;
  private lastLocalAt?:string;
+ private validatedAgainstSdk=0;private validationMismatches=0;
  private unsub?:()=>void;
  private lastErrorReason=new Map<string,string>();
  constructor(
@@ -153,6 +155,16 @@ export class LocalWhirlpoolQuoter{
    throw error;
   }
  }
+ validateAgainstSdk(pool:string,direction:Direction,raw:string,outputRaw:string,feeRaw:string):boolean{
+  const local=this.quoteExact(pool,direction,BigInt(raw));
+  if(!local)return false;
+  if(local.outputRaw===outputRaw&&local.feeRaw===feeRaw){
+   this.validatedAgainstSdk++;return true;
+  }
+  this.validationMismatches++;
+  this.lastErrorReason.set(pool,'sdk_local_quote_mismatch');
+  return false;
+ }
  quoteExact(pool:string,direction:Direction,inputRaw:bigint,now=Date.now()):LocalQuote|null{
   if(inputRaw<=0n)return null;
   const layout=this.layouts.get(pool),decoded=this.decodePool(pool);
@@ -210,13 +222,21 @@ export class LocalWhirlpoolQuoter{
  }
  snapshot():LocalPricingHealth{
   let readyPools=0;
-  for(const pool of this.layouts.keys()){
-   if(this.quoteExact(pool,'USDC_TO_SOL',5000000n))readyPools++;
+  for(const [pool,layout] of this.layouts){
+   const base=this.feed.get(pool);
+   const tickKeys=layout.directions.USDC_TO_SOL.map(x=>x.address);
+   const ticks=tickKeys.map(address=>this.feed.get(address));
+   if(!base||ticks.some(x=>!x))continue;
+   const checked=validateLocalComponents([base,...ticks.filter((x):x is MarketObservation=>Boolean(x))],
+    Date.now(),this.maxAgeMs,this.maxSlotSkew);
+   if(checked.ok)readyPools++;
   }
   return {trackedPools:this.layouts.size,preparedPools:this.layouts.size,readyPools,
    bootstrapReads:this.bootstrapReads,localCalculations:this.localCalculations,
    localErrors:this.localErrors,unsupportedPools:this.unsupportedPools,
-   lastLocalAt:this.lastLocalAt,errors:[...this.errors]};
+   lastLocalAt:this.lastLocalAt,validatedAgainstSdk:this.validatedAgainstSdk,
+   validationMismatches:this.validationMismatches,
+   errors:[...this.errors,...[...this.lastErrorReason.entries()].slice(0,3).map(([pool,reason])=>pool+': '+reason)].slice(0,10)};
  }
  forget(pool:string){
   const layout=this.layouts.get(pool);
