@@ -1,40 +1,35 @@
 # SOL ARB — Phase A Solana Pool Monitor
 
-Read-only TypeScript + Node.js collector for verified Solana mainnet AMM pool state accounts. Uses WebSocket subscriptions plus periodic RPC reconciliation, tracks last observed slots and data hashes, and journals events to local JSONL files.
+Read-only TypeScript/Node.js account monitoring with **automatic SOL/USDC pool discovery** from Raydium and Orca, validated against Solana mainnet account existence. WebSocket subscriptions and RPC reconciliation record slot, owner, data hash, and observed time in JSONL.
 
-**No live trading, wallets, or arbitrage calculations are implemented.** This Phase A starter does not decode AMM reserves, order-book data, fees or executable swap prices.
+**No wallets, swaps or arbitrage calculations are implemented.** The external discovery APIs may change; warnings indicate missing or failed venues. Discovery checks token mints in registry responses and confirms accounts are on-chain; this does not constitute a cryptographic or program-layout audit of each pool.
 
 ## Quick start (Node.js 20+)
 
 ```powershell
-git clone https://github.com/Agent-03/sol-arbs.git
-cd sol-arbs
-npm install
+git pull origin main
+npm.cmd install
 Copy-Item .env.example .env
 notepad .env
-npm run build
-npm test
-npm run dev
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
 ```
 
-Configure `.env` with your **private** Solana mainnet HTTPS RPC and WSS endpoints, and comma-separated **verified AMM pool state account addresses**, not token mints. The application intentionally refuses to start without them; no addresses have been invented.
+If `.env` already exists, **keep it** and simply leave `POOL_ADDRESSES=` blank. Configure `SOLANA_RPC_URL` (and optionally `SOLANA_WS_URL`) with your own mainnet RPC endpoints.
 
-Inspect `http://127.0.0.1:8787/health` and `http://127.0.0.1:8787/pools`. Account update metadata is journaled to `data/YYYY-MM-DD.jsonl`. The `.env` and `data/` directories are gitignored.
+Dashboard/API endpoints:
 
-## Configuration
+- `http://127.0.0.1:8787/health`: monitored pool health
+- `http://127.0.0.1:8787/pools`: tracked account snapshots
+- `http://127.0.0.1:8787/discovery`: discovered pools with venue and warnings
 
-| Variable | Purpose |
-|---|---|
-| `SOLANA_RPC_URL` | Mainnet HTTPS RPC URL |
-| `SOLANA_WS_URL` | Mainnet WSS URL |
-| `POOL_ADDRESSES` | Verified AMM pool state accounts |
-| `POLL_INTERVAL_MS` | Reconcile interval (default 15000) |
-| `STALE_AFTER_MS` | Update-age threshold (default 30000) |
-| `HEALTH_PORT` | Local API port (default 8787) |
-| `DATA_DIR` | JSONL output directory (default ./data) |
+Events journal locally into `data/YYYY-MM-DD.jsonl`, excluded from Git. Keep credentials in local `.env`, never in GitHub.
 
-## Caveats and next steps
+## Current constraints
 
-The starter hasn't been verified against a live RPC in this environment. Quiet pools can appear stale even with a working connection. Polling can miss intermediate states and cannot guarantee all accounts came from a consistent on-chain snapshot. The JSONL journal is not replayed on startup. Phase B must implement pool discovery, supported DEX account layout decoding, vault/tick/bin subscriptions, exact route quotes, fee modeling, and execution simulation.
+The scanner loads a bounded set of discovered pools on startup; it does **not** yet periodically refresh the list or inspect vault/tick/bin-array accounts. When data remains quiet, account update age may be marked stale despite an available RPC. Backfill/polling cannot guarantee observing all intermediate states. On restart, the journal is not replayed. This is an account-data foundation only, not an executable arbitrage signal.
 
-Never commit RPC API keys, private keys, or seed phrases.
+For Phase B, implement actual program-owner and account-layout verification, vault subscriptions, exact DEX-specific quotes, routing and total transaction cost simulation.
+
+Source discovery API: Raydium v3 `/pools/info/mint`; Orca `/v2/solana/pools`.
