@@ -129,4 +129,5 @@ test('C3D.4.3 tracks queue wait and transport time separately by priority',async
  assert.ok(snapshot.transportMsP95.quotes>=5);
  assert.equal(snapshot.transportMsP95.background,0);
  assert.equal(snapshot.backgroundMaxConcurrent,1);
+ assert.ok(snapshot.pacingMsP95.quotes>=0);
 });
