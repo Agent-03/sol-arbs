@@ -386,8 +386,7 @@ export class MarketEngine {
     intervalMs:this.discoveryInterval(),reason:this.lastDiscoveryReason,
     validatedCandidates:this.discoveryValidated,trackedPools:this.pools.length,
     newlyAdded:this.discoveryAdded,removed:this.discoveryRemoved,
-    quoteSupportedPools:this.pools.filter(p=>[RAYDIUM_AMM_V4,RAYDIUM_CLMM,ORCA_WHIRLPOOL].includes(p.owner)&&
-     (p.liquidityUsd===undefined||p.liquidityUsd>=this.config.minQuoteLiquidityUsd)).length,
+    quoteSupportedPools:coverage.supportedEligiblePools,
     lowLiquidityExcluded:this.pools.filter(p=>[RAYDIUM_AMM_V4,RAYDIUM_CLMM,ORCA_WHIRLPOOL].includes(p.owner)&&
      p.liquidityUsd!==undefined&&p.liquidityUsd<this.config.minQuoteLiquidityUsd).length,
     coverage:cover,eligibility:poolEligibility,utility:coverage,
