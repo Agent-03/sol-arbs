@@ -330,7 +330,7 @@ export class LocalWhirlpoolQuoter{
  isKnownUnquotable(pool:string,direction:Direction,inputRaw:bigint):boolean{
   const failure=this.failureGate.get(pool,direction,inputRaw);
   if(!failure)return false;
-  const decoded=this.decodePool(pool);
+  const decoded=this.decodePool(pool),layout=this.layouts.get(pool);
   if(!decoded)return false;
   const required=this.tickKeys(pool,decoded.data,
    direction==='A_TO_B'||(direction!=='B_TO_A'&&
