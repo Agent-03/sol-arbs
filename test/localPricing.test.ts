@@ -74,3 +74,13 @@ test('C2 failure gate isolates input size and direction on the same pool',()=>{
  gate.clearPool('pool-a');
  assert.equal(gate.summary().activeFailures,0);
 });
+
+test('C2 unquotable quote cache stays bounded when reverse input amounts change',()=>{
+ const gate=new QuoteFailureGate(2);
+ gate.reject('a','USDC_TO_SOL',5000000n,'bytes-one','no_tick_liquidity');
+ gate.reject('a','SOL_TO_USDC',1000n,'bytes-one','no_tick_liquidity');
+ gate.reject('a','SOL_TO_USDC',2000n,'bytes-one','no_tick_liquidity');
+ assert.equal(gate.summary().activeFailures,2);
+ assert.equal(gate.get('a','USDC_TO_SOL',5000000n),undefined);
+ assert.ok(gate.get('a','SOL_TO_USDC',2000n));
+});
