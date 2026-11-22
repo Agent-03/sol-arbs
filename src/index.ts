@@ -66,6 +66,7 @@ async function main(){
    if(path==='/amm-v4'){
     send(200,{...engine.getRaydium(),note:'Indicative non-executable AMM v4 pool quotes only.'});return;
    }
+   if(path==='/clmm'){send(200,{...engine.getClmm(),note:'Raydium tick-array SDK research quotes; component slots not coherent or execution-verified.'});return;}
    if(path==='/orca'){
     const r=engine.getRaydium();
     send(200,{...engine.getOrca(),raydiumQuoteStatus:r.status,raydiumQuoteCount:r.quotes.length,
@@ -73,15 +74,17 @@ async function main(){
    }
    if(path==='/arb'){
     const d=dashboard(),o=d.opportunities;
-    send(200,{phase:'B5',status:d.status,updatedAt:d.now,b5:d.b5,
+    send(200,{phase:'B5.1',status:d.status,updatedAt:d.now,b5:d.b5,
      indicativeRoutes:o.total,comparableRoutes:o.comparable,excludedRoutes:o.excluded,
      positiveComparable:o.positive,bestComparableNetUsd:o.bestComparableNetUsd,
      executableRoutes:0,raydiumQuoteStatus:d.raydium.status,raydiumQuoteCount:d.raydium.quotes,
      raydiumErrors:d.raydium.errors,errors:d.orca.errors,
      freshnessRules:o.rules,excludedByReason:o.excludedByReason,
+     coverage:d.discovery.utility,poolEligibility:d.discovery.eligibility,
+     clmm:{selectedPools:d.clmm.selectedPools,readyPools:d.clmm.readyPools,quotes:d.clmm.quotes},
      candidates:[...o.comparableRoutes,...o.excludedRoutes],
      rpc:d.rpc,
-     warning:'B5 read-only research: Raydium event-local state; Orca SDK/RPC state may lag. No atomic execution, simulation or validated landing costs.'});
+     warning:'B5.1 research only: Raydium CLMM SDK reads are not one-slot coherent; Orca tick arrays may lag. No validated transaction simulation or execution.'});
     return;
    }
    if(path==='/routes'){
