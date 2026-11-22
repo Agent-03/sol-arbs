@@ -6,10 +6,11 @@ import {WhirlpoolContext,buildWhirlpoolClient,swapQuoteByInputToken,IGNORE_CACHE
 import {SOL_MINT,USDC_MINT,type DiscoveredPool} from './discovery.js';
 import {ORCA_WHIRLPOOL} from './routes.js';
 import {amountOutExactInput,type AmmV4Quote} from './ammV4.js';
+import {LastKnownQuoteBook} from './quoteBook.js';
 
 export type OrcaQuote={
  pool:string;direction:'USDC_TO_SOL'|'SOL_TO_USDC';inputRaw:string;outputRaw:string;
- feeRaw:string;observedAt:string;computedAt?:string;poolSlot:number|null;classification:'indicative_non_executable';
+ feeRaw:string;observedAt:string;computedAt?:string;tickArraysObservedAt?:string;tickArraySlot:null;poolSlot:number|null;classification:'indicative_non_executable';
 };
 export type ArbitrageCandidate={
  id:string;sizeUsd:number;buyVenue:'raydium'|'orca';sellVenue:'raydium'|'orca';
@@ -20,6 +21,10 @@ export type ArbitrageCandidate={
 };
 export type OrcaStatus={status:'idle'|'scanning'|'ok'|'partial_error';lastUpdatedAt?:string;
  quotedLegs:OrcaQuote[];routeCandidates:ArbitrageCandidate[];errors:string[];orcaPools:number;
+ quoteState?:'warming'|'refreshing'|'fresh'|'expired';
+ freshLegs?:number;expiredLegs?:number;
+ poolFreshness?:Array<{pool:string;refreshing:boolean;lastCompletedAt?:string;legs:number}>;
+ tickArraysSlotVerified?:false;
  progress?:{totalPools:number;completedPools:number;quotesCompleted:number;routesEstimated:number;currentPool?:string;currentSizeUsd?:number};};
 
 export function evaluateRoute(
@@ -46,6 +51,8 @@ export class OrcaMonitor{
  private state:OrcaStatus={status:'idle',quotedLegs:[],routeCandidates:[],errors:[],orcaPools:0};
  private running=false;private timer?:ReturnType<typeof setTimeout>;private busy=false;
  private rateLimitedUntil=0;
+ private readonly book=new LastKnownQuoteBook<OrcaQuote>();
+ private readonly tickObservedAt=new Map<string,string>();
  private addError(errors:string[],context:string,error:unknown){
   const detail=String(error);
   errors.push(`${context}: ${detail}`);
@@ -63,16 +70,24 @@ export class OrcaMonitor{
  constructor(private readonly connection:Connection,private readonly pools:DiscoveredPool[],
    private readonly sizesUsd:number[],private readonly getRaydiumQuotes:()=>AmmV4Quote[],
    private readonly assumedCostUsd:number,private readonly intervalMs=60000,private readonly minLiquidityUsd=0,
-   private readonly onLeg?:()=>void){
+   private readonly onLeg?:()=>void,
+   private readonly maxQuoteAgeMs=15000,
+   private readonly getExtraBuys?:()=>Array<{pool:string;inputRaw:string;outputRaw:string;observedAt:string;slot:number|null}>){
   // Ephemeral, unused local signing identity required by legacy SDK provider.
   // This service NEVER signs or broadcasts transactions.
   const provider=new AnchorProvider(connection,new Wallet(Keypair.generate()),{commitment:'confirmed'});
   this.ctx=WhirlpoolContext.withProvider(provider);
   this.client=buildWhirlpoolClient(this.ctx);
  }
- snapshot():OrcaStatus{return {...this.state,quotedLegs:[...this.state.quotedLegs],routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};}
- private publishLegs(legs:OrcaQuote[]){
-  this.state={...this.state,quotedLegs:[...legs]};
+ snapshot():OrcaStatus{
+  const b=this.book.snapshot(Date.now(),this.maxQuoteAgeMs);
+  return {...this.state,quotedLegs:b.entries,quoteState:this.state.status==='scanning'?'refreshing':b.quoteState,
+   freshLegs:b.freshLegs,expiredLegs:b.expiredLegs,poolFreshness:b.poolStatus,
+   tickArraysSlotVerified:false,routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};
+ }
+ private publishLegs(leg:OrcaQuote){
+  this.book.publish(leg);
+  this.state={...this.state,quotedLegs:this.book.snapshot(Date.now(),this.maxQuoteAgeMs).entries};
   try{this.onLeg?.();}catch(error){this.addError(this.state.errors,'Orca quote progress callback',error);}
  }
  private async preparePool(poolAddress:string):Promise<{pool:Whirlpool;poolSlot:number;observedAt:string}>{
@@ -92,11 +107,15 @@ export class OrcaMonitor{
   const inputMint=direction==='USDC_TO_SOL'?USDC_MINT:SOL_MINT;
   // Refresh tick arrays once per direction per cycle; subsequent size quotes use
   // that cycle's cached arrays. This reduces RPC load but does not ensure a coherent slot.
+  const tickKey=poolAddress+':'+direction;
+  const tickReadStart=refreshTicks?new Date().toISOString():this.tickObservedAt.get(tickKey);
   const result=await swapQuoteByInputToken(pool,new PublicKey(inputMint),new BN(inputRaw.toString()),
    Percentage.fromFraction(0,10000),this.ctx.program.programId,this.client.getFetcher(),refreshTicks?IGNORE_CACHE:PREFER_CACHE);
   if(result.estimatedAmountOut.isNeg()||result.estimatedAmountOut.isZero())throw new Error('No output in Whirlpool quote');
+  if(refreshTicks&&tickReadStart)this.tickObservedAt.set(tickKey,tickReadStart);
   return {pool:poolAddress,direction,inputRaw:inputRaw.toString(),outputRaw:result.estimatedAmountOut.toString(),
    feeRaw:result.estimatedFeeAmount.toString(),observedAt:poolObservedAt,computedAt:new Date().toISOString(),
+   tickArraysObservedAt:tickReadStart,tickArraySlot:null,
    poolSlot,classification:'indicative_non_executable'};
  }
  async scanOnce(){
@@ -107,7 +126,7 @@ export class OrcaMonitor{
   }
   this.busy=true;
   const orca=this.pools.filter(p=>(p.venue==='orca'||p.venue==='manual')&&p.owner===ORCA_WHIRLPOOL && (p.liquidityUsd===undefined||p.liquidityUsd>=this.minLiquidityUsd));
-  this.state={...this.state,status:'scanning',quotedLegs:[],routeCandidates:[],progress:{totalPools:orca.length,completedPools:0,quotesCompleted:0,routesEstimated:0}};
+  this.state={...this.state,status:'scanning',progress:{totalPools:orca.length,completedPools:0,quotesCompleted:0,routesEstimated:0}};
   const legs:OrcaQuote[]=[],candidates:ArbitrageCandidate[]=[],errors:string[]=[];
   try{
    const rayQuotes=this.getRaydiumQuotes();
@@ -119,7 +138,7 @@ export class OrcaMonitor{
     if(this.rateLimitedUntil>Date.now())break;
     this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address}};
     let prepared: {pool:Whirlpool;poolSlot:number;observedAt:string};
-    try{prepared=await this.preparePool(pool.address);}
+    try{prepared=await this.preparePool(pool.address);this.book.begin(pool.address);}
     catch(e){this.addError(errors,`Orca pool ${pool.address}`,e);completed++;if(this.rateLimitedUntil>Date.now())break;continue;}
     let buyTicksRefreshed=false;
     let sellTicksRefreshed=false;
@@ -128,7 +147,7 @@ export class OrcaMonitor{
      this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address,currentSizeUsd:size}};
      const amount=BigInt(Math.round(size*1e6));
      try{
-      const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;legs.push(buy);this.publishLegs(legs);
+      const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;legs.push(buy);this.publishLegs(buy);
       // Buy Orca, sell Raydium using each known Raydium pool's USDC-side output reserve.
       for(const ray of bySize.get(size)??[]){
        try{
@@ -142,7 +161,7 @@ export class OrcaMonitor{
       // Buy Raydium, sell Orca at EXACT amount produced by first leg.
       for(const ray of bySize.get(size)??[]){
        try{
-        const sell=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'SOL_TO_USDC',BigInt(ray.outputRaw),!sellTicksRefreshed);sellTicksRefreshed=true;legs.push(sell);this.publishLegs(legs);
+        const sell=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'SOL_TO_USDC',BigInt(ray.outputRaw),!sellTicksRefreshed);sellTicksRefreshed=true;legs.push(sell);this.publishLegs(sell);
         candidates.push(this.annotateLiquidity(evaluateRoute(size,
          {pool:ray.pool,venue:'raydium',inputRaw:ray.inputRaw,outputRaw:ray.outputRaw,observedAt:ray.observedAt,slot:ray.vaultSlot},
          {pool:pool.address,venue:'orca',inputRaw:sell.inputRaw,outputRaw:sell.outputRaw,observedAt:sell.observedAt,slot:sell.poolSlot},
@@ -152,12 +171,15 @@ export class OrcaMonitor{
      }catch(e){this.addError(errors,`${pool.address} ${size}`,e);}
      this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address,currentSizeUsd:size}};
     }
+    this.book.complete(pool.address,new Date().toISOString());
     completed++;
    }
   }finally{
    this.busy=false;
+   this.book.retain(new Set(orca.map(p=>p.address)));
+   for(const pool of orca)this.book.fail(pool.address);
    this.state={status:errors.length?'partial_error':'ok',lastUpdatedAt:new Date().toISOString(),
-    quotedLegs:legs,routeCandidates:candidates,errors,orcaPools:orca.length,progress:{totalPools:orca.length,completedPools:orca.length,quotesCompleted:legs.length,routesEstimated:candidates.length}};
+    quotedLegs:this.book.snapshot(Date.now(),this.maxQuoteAgeMs).entries,routeCandidates:candidates,errors,orcaPools:orca.length,progress:{totalPools:orca.length,completedPools:orca.length,quotesCompleted:legs.length,routesEstimated:candidates.length}};
   }
  }
  start(){if(this.running)return;this.running=true;const loop=async()=>{if(!this.running)return;try{await this.scanOnce();}catch(e){this.state={...this.state,status:'partial_error',errors:[String(e)]};}if(this.running)this.timer=setTimeout(()=>{void loop();},this.intervalMs);};void loop();}
