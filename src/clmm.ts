@@ -19,7 +19,7 @@ export type ClmmQuote={
  inputRaw:string;outputRaw:string;observedAt:string;computedAt:string;poolSlot:number;
  feeRaw:string;tickArraysObservedAt:string;tickArraySlot:number|null;
  quoteModel:'raydium_clmm_sdk_tick_array';
- snapshotIntegrity:'multi_rpc_context_unverified'|'same_context_cached';
+ snapshotIntegrity:'multi_rpc_context_unverified'|'bounded_slot_cached';
 };
 export type ClmmHealth={
  status:'idle'|'scanning'|'ok'|'partial_error';
