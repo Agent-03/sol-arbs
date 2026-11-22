@@ -1,4 +1,5 @@
 import {amountOutExactInput} from './ammV4.js';
+import {cpmmAmountOut} from './c3Cpmm.js';
 import {SOL_MINT,USDC_MINT} from './discovery.js';
 
 export type GraphAsset='USDC'|'SOL'|'USDT'|'JUP';
@@ -12,8 +13,9 @@ const MINT_TO_ASSET=new Map(Object.entries(GRAPH_ASSETS).map(([name,token])=>[to
 export const assetOfMint=(mint:string):GraphAsset|undefined=>MINT_TO_ASSET.get(mint);
 
 export type GraphPool={
- address:string;program:'raydium_amm_v4';tokenA:GraphAsset;tokenB:GraphAsset;
+ address:string;program:'raydium_amm_v4'|'raydium_cpmm';tokenA:GraphAsset;tokenB:GraphAsset;
  reserveA:string;reserveB:string;feeNumerator:string;feeDenominator:string;
+ creatorFeeRate?:string;creatorFeeOn?:0|1|2;
  observedAt:string;poolSlot:number;vaultSlot:number;liquidityUsd:number|null;
  // Exact-byte coherence across all 3 accounts is not established by 12-slot tolerance.
  snapshotIntegrity:'bounded_slot_research';
@@ -34,18 +36,19 @@ export type GraphCycle={
 export type GraphScanLimits={
  sizesUsd:readonly number[];maxAgeMs:number;maxGapMs:number;maxSlotSkew:number;
  minLiquidityUsd:number;maxPathChecks:number;maxResults:number;assumedCostUsd:number;
+ maxPoolInputShareBps?:number;
 };
 export type GraphEvaluation={
  phase:'C3B';mode:'READ_ONLY';evaluatedAt:string;
  elapsedMs:number;poolCount:number;eligiblePools:number;stalePools:number;
- pathChecks:number;truncated:boolean;
+ pathChecks:number;depthRejected:number;truncated:boolean;
  twoLegChecks:number;threeLegChecks:number;
  twoLegCycles:number;threeLegCycles:number;positiveIndicative:number;
  bestIndicativeNetUsd:number|null;candidates:GraphCycle[];
  limitations:string[];
 };
 const LIMITATIONS=[
- 'Raydium AMM V4 pool-vault local CPMM math only; no Orca/CLMM/Meteora quotes in this C3 graph.',
+ 'Raydium AMM V4 and CPMM pool-vault research math; no Orca/CLMM/Meteora routes in this C3 graph.',
  'Independent WebSocket account observations are not same-slot atomic snapshots.',
  'Fees, Jito tips and execution landing are estimates or unknown; a positive route is not executable profit.',
  'Historical replay, transaction simulation and actual swap execution are NOT enabled.'
@@ -64,7 +67,9 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
   !validInt(limits.maxSlotSkew)||!validInt(limits.maxPathChecks)||
   limits.maxPathChecks<1||!validInt(limits.maxResults)||limits.maxResults<1||
   !Number.isFinite(limits.minLiquidityUsd)||limits.minLiquidityUsd<0||
-  !Number.isFinite(limits.assumedCostUsd)||limits.assumedCostUsd<0)
+  !Number.isFinite(limits.assumedCostUsd)||limits.assumedCostUsd<0||
+  (limits.maxPoolInputShareBps!==undefined&&
+   (!validInt(limits.maxPoolInputShareBps)||limits.maxPoolInputShareBps>10000)))
   throw new Error('Invalid C3B graph scan limits');
  const started=Date.now();
  const edges=new Map<GraphAsset,Edge[]>();
@@ -92,7 +97,7 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
    eligiblePools++;
   }catch{stalePools++}
  }
- let pathChecks=0,twoLegChecks=0,threeLegChecks=0;
+ let pathChecks=0,depthRejected=0,twoLegChecks=0,threeLegChecks=0;
  let twoLegCycles=0,threeLegCycles=0,positiveIndicative=0;
  let truncated=false;
  const candidates:GraphCycle[]=[];
@@ -111,10 +116,19 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
    if(pathChecks>=limits.maxPathChecks){truncated=true;return;}
    pathChecks++;
    const n=depth+1;
+   if(limits.maxPoolInputShareBps!==undefined&&
+      raw*10000n>edge.reserveIn*BigInt(limits.maxPoolInputShareBps)){
+    depthRejected++;continue;
+   }
    if(n===2)twoLegChecks++;
    if(n===3)threeLegChecks++;
    let output:bigint;
-   try{output=amountOutExactInput(raw,edge.reserveIn,edge.reserveOut,edge.feeNum,edge.feeDen);}
+   try{output=edge.pool.program==='raydium_cpmm'
+     ?cpmmAmountOut(raw,edge.reserveIn,edge.reserveOut,
+       edge.feeNum,BigInt(edge.pool.creatorFeeRate??'-1'),
+       edge.pool.creatorFeeOn??-1 as 0|1|2,
+       edge.from===edge.pool.tokenA)
+     :amountOutExactInput(raw,edge.reserveIn,edge.reserveOut,edge.feeNum,edge.feeDen);}
    catch{continue}
    if(output<=0n)continue;
    const hop:GraphLeg={pool:edge.pool.address,program:edge.pool.program,
@@ -166,7 +180,7 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
   a.id.localeCompare(b.id));
  return {phase:'C3B',mode:'READ_ONLY',evaluatedAt:new Date(now).toISOString(),
   elapsedMs:Date.now()-started,poolCount:unique.size,eligiblePools,stalePools,
-  pathChecks,truncated,twoLegChecks,threeLegChecks,
+  pathChecks,depthRejected,truncated,twoLegChecks,threeLegChecks,
   twoLegCycles,threeLegCycles,positiveIndicative,
   bestIndicativeNetUsd:candidates[0]?.indicativeNetUsd??null,
   candidates:candidates.slice(0,limits.maxResults),limitations:[...LIMITATIONS]};
