@@ -42,18 +42,19 @@ async function main(){
     res.end(path==='/terminal'?dashboardHtml:explorerHtml);
     return;
    }
-   if(req.method==='POST'&&(path==='/api/actions/scan'||path==='/api/actions/discover')){
+   if(req.method==='POST'&&(path==='/api/actions/scan'||path==='/api/actions/discover'||path==='/api/actions/validate')){
     // Loopback only: reject cross-site browser POSTs (no write actions on chain).
     const allowed='http://127.0.0.1:'+config.port;
     const origin=req.headers.origin;
     if(origin && origin!==allowed){send(403,{accepted:false,message:'Foreign origin rejected'});return;}
-    const result=path.endsWith('/scan')?engine.requestScan():engine.requestDiscovery();
+    const result=path.endsWith('/scan')?engine.requestScan():path.endsWith('/validate')?engine.requestC2Validation():engine.requestDiscovery();
     send(result.accepted?202:429,result);
     return;
    }
    if(req.method!=='GET'){send(405,{error:'Method not allowed'});return;}
    const dashboard=()=>engine.dashboard();
    if(path==='/api/dashboard'){send(200,dashboard());return;}
+   if(path==='/api/c2'){send(200,{phase:'C2',readOnly:true,...dashboard().c2,executableRoutes:0});return;}
    if(path==='/api/market-data'){send(200,{phase:'C1',readOnly:true,...marketData.snapshot(),warning:'Account-state cache only; SDK tick arrays may be older or from unrelated RPC contexts.'});return;}
    if(path==='/api/explorer'){
     const d=dashboard();
@@ -65,7 +66,7 @@ async function main(){
      mode:'READ_ONLY',observedAt:d.now,market:'SOL/USDC',phase:d.phase,
      summary:{status:d.status,opportunities:d.opportunities,
       utility:d.discovery.utility,orca:d.orca,clmm:d.clmm,
-      raydium:d.raydium,b5:d.b5,c1:d.c1,scan:d.scan,rpc:d.rpc},
+      raydium:d.raydium,b5:d.b5,c1:d.c1,c2:d.c2,scan:d.scan,rpc:d.rpc},
      routes:candidates,quotes:{orca,raydium,clmm},
      pools:d.discovery.eligibility,events:d.activity,
      transactionIndexing:false,
@@ -78,7 +79,7 @@ async function main(){
     const s=scanner.snapshot(),d=dashboard();
     send(s.status==='healthy'?200:503,{status:s.status,lastPollAt:s.lastPollAt,errors:s.errors,
      trackedPools:s.pools.length,stalePools:s.pools.filter(p=>p.stale).length,
-     scan:d.scan,b5:d.b5,c1:d.c1,opportunities:{comparable:d.opportunities.comparable,positive:d.opportunities.positive},
+     scan:d.scan,b5:d.b5,c1:d.c1,c2:d.c2,opportunities:{comparable:d.opportunities.comparable,positive:d.opportunities.positive},
      rpc:rpcLimiter.snapshot(),executableRoutes:0});
     return;
    }
@@ -96,13 +97,13 @@ async function main(){
    }
    if(path==='/arb'){
     const d=dashboard(),o=d.opportunities;
-    send(200,{phase:'B5.1',status:d.status,updatedAt:d.now,b5:d.b5,
+    send(200,{phase:'C2',status:d.status,updatedAt:d.now,b5:d.b5,
      indicativeRoutes:o.total,comparableRoutes:o.comparable,excludedRoutes:o.excluded,
      positiveComparable:o.positive,bestComparableNetUsd:o.bestComparableNetUsd,
      executableRoutes:0,raydiumQuoteStatus:d.raydium.status,raydiumQuoteCount:d.raydium.quotes,
      raydiumErrors:d.raydium.errors,errors:d.orca.errors,
      freshnessRules:o.rules,excludedByReason:o.excludedByReason,
-     coverage:d.discovery.utility,poolEligibility:d.discovery.eligibility,
+     coverage:d.discovery.utility,poolEligibility:d.discovery.eligibility,c2:d.c2,
      clmm:{selectedPools:d.clmm.selectedPools,readyPools:d.clmm.readyPools,quotes:d.clmm.quotes},
      candidates:[...o.comparableRoutes,...o.excludedRoutes],
      rpc:d.rpc,
