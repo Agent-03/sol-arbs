@@ -8,6 +8,7 @@ import {RpcProviderPool} from './rpcFailover.js';
 import {MarketEngine} from './engine.js';
 import {dashboardHtml} from './dashboard.js';
 import {explorerHtml} from './explorerDashboard.js';
+import {MarketDataFeed} from './marketData.js';
 
 async function main(){
  const config=loadConfig();
@@ -20,8 +21,9 @@ async function main(){
  const discovered=await discoverPools(connection,manualPools,config.maxPools);
  for(const warning of discovered.warnings)console.warn('[discovery]',warning);
  config.pools=discovered.pools.map(p=>new PublicKey(p.address));
- const scanner=new Scanner(config,connection);
- const engine=new MarketEngine(connection,config,scanner,rpcLimiter,jupiter,discovered,manualPools);
+ const marketData=new MarketDataFeed(connection,config.freshness.maxAgeMs,config.freshness.maxSlotSkew);
+ const scanner=new Scanner(config,connection,marketData);
+ const engine=new MarketEngine(connection,config,scanner,rpcLimiter,jupiter,discovered,manualPools,marketData);
  console.log(JSON.stringify({event:'discovery_complete',pools:discovered.pools.length,
   validatedCandidateAccounts:discovered.validatedCount,
   theoreticalRoutes:engine.getTopology().candidates.length,warnings:discovered.warnings}));
@@ -52,6 +54,7 @@ async function main(){
    if(req.method!=='GET'){send(405,{error:'Method not allowed'});return;}
    const dashboard=()=>engine.dashboard();
    if(path==='/api/dashboard'){send(200,dashboard());return;}
+   if(path==='/api/market-data'){send(200,{phase:'C1',readOnly:true,...marketData.snapshot(),warning:'Account-state cache only; SDK tick arrays may be older or from unrelated RPC contexts.'});return;}
    if(path==='/api/explorer'){
     const d=dashboard();
     const candidates=engine.assessment().candidates;
@@ -62,7 +65,7 @@ async function main(){
      mode:'READ_ONLY',observedAt:d.now,market:'SOL/USDC',phase:d.phase,
      summary:{status:d.status,opportunities:d.opportunities,
       utility:d.discovery.utility,orca:d.orca,clmm:d.clmm,
-      raydium:d.raydium,b5:d.b5,scan:d.scan,rpc:d.rpc},
+      raydium:d.raydium,b5:d.b5,c1:d.c1,scan:d.scan,rpc:d.rpc},
      routes:candidates,quotes:{orca,raydium,clmm},
      pools:d.discovery.eligibility,events:d.activity,
      transactionIndexing:false,
@@ -75,7 +78,7 @@ async function main(){
     const s=scanner.snapshot(),d=dashboard();
     send(s.status==='healthy'?200:503,{status:s.status,lastPollAt:s.lastPollAt,errors:s.errors,
      trackedPools:s.pools.length,stalePools:s.pools.filter(p=>p.stale).length,
-     scan:d.scan,b5:d.b5,opportunities:{comparable:d.opportunities.comparable,positive:d.opportunities.positive},
+     scan:d.scan,b5:d.b5,c1:d.c1,opportunities:{comparable:d.opportunities.comparable,positive:d.opportunities.positive},
      rpc:rpcLimiter.snapshot(),executableRoutes:0});
     return;
    }
@@ -144,6 +147,7 @@ async function main(){
   jupiter.stop();
   server.close();
   await engine.stop();
+  await marketData.stop();
  };
  process.once('SIGINT',()=>{void stop();});
  process.once('SIGTERM',()=>{void stop();});
