@@ -76,3 +76,14 @@ test('fast diagnostic mode does not pretend to monitor the reverse direction',()
  assert.equal(full.theoreticalComparisons,12);
  assert.ok(fast.comparisonCoveragePct>full.comparisonCoveragePct);
 });
+
+test('C2 invalidated Whirlpool prices stay visible but fail research eligibility',()=>{
+ const staleState:OrcaStatus={...orca,
+  invalidatedPools:['orca-high'],
+  quotedLegs:[{...orcaLeg,invalidated:true}]};
+ const list=classifyPoolEligibility(pools,ray,staleState,clmm,10000,1,15000,now);
+ const affected=list.find(p=>p.address==='orca-high');
+ assert.equal(affected?.state,'expired');
+ assert.equal(affected?.qualifiesForResearch,false);
+ assert.match(affected?.reason??'',/invalidated/);
+});
