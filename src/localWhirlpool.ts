@@ -27,6 +27,7 @@ export type LocalPricingHealth={
  bootstrapReads:number;localCalculations:number;localErrors:number;
  unsupportedPools:number;lastLocalAt?:string;
  validatedAgainstSdk:number;validationMismatches:number;
+ verifiedUninitializedTickArrays:number;
  errors:string[];
 };
 
@@ -63,6 +64,7 @@ export class LocalWhirlpoolQuoter{
  private unsupportedPools=0;
  private lastLocalAt?:string;
  private validatedAgainstSdk=0;private validationMismatches=0;
+ private verifiedUninitializedTickArrays=0;
  private unsub?:()=>void;
  private lastErrorReason=new Map<string,string>();
  constructor(
@@ -180,14 +182,21 @@ export class LocalWhirlpoolQuoter{
    return null;
   }
   const tickArrays:TickArray[]=[];
-  const observations:MarketObservation[]=[decoded.observation];
+  const observations:Array<{slot:number;receivedAt:number}>=[decoded.observation];
   for(const {address,startTickIndex} of required){
    const observation=this.feed.get(address);
-   // Missing tick arrays must not be guessed to be empty. C2 fails
-   // closed until a coherent snapshot actually verifies their state.
    if(!observation){
-    this.lastErrorReason.set(pool,'tick_array_not_cached');
-    return null;
+    // A verified RPC-null at a specific slot proves that the array is
+    // uninitialized in that snapshot; never invent an empty tick array
+    // without a time/slot-qualified absence observation.
+    const absent=this.feed.getVerifiedAbsent(address);
+    if(!absent){
+     this.lastErrorReason.set(pool,'tick_array_not_cached_or_not_verified_absent');
+     return null;
+    }
+    observations.push(absent);
+    tickArrays.push({address:new PublicKey(address),startTickIndex,data:null});
+    continue;
    }
    if(observation.owner!==ORCA_WHIRLPOOL){
     this.lastErrorReason.set(pool,'tick_array_owner_mismatch');return null;
@@ -211,6 +220,7 @@ export class LocalWhirlpoolQuoter{
    },Percentage.fromFraction(0,10000));
    if(result.estimatedAmountOut.lten(0))return null;
    this.localCalculations++;this.lastLocalAt=new Date(now).toISOString();
+   this.verifiedUninitializedTickArrays+=tickArrays.filter(q=>q.data===null).length;
    this.lastErrorReason.delete(pool);
    const tickAt=Math.min(...observations.slice(1).map(x=>x.receivedAt));
    return {pool,direction,inputRaw:inputRaw.toString(),
@@ -225,9 +235,9 @@ export class LocalWhirlpoolQuoter{
   for(const [pool,layout] of this.layouts){
    const base=this.feed.get(pool);
    const tickKeys=layout.directions.USDC_TO_SOL.map(x=>x.address);
-   const ticks=tickKeys.map(address=>this.feed.get(address));
+   const ticks=tickKeys.map(address=>this.feed.get(address)??this.feed.getVerifiedAbsent(address));
    if(!base||ticks.some(x=>!x))continue;
-   const checked=validateLocalComponents([base,...ticks.filter((x):x is MarketObservation=>Boolean(x))],
+   const checked=validateLocalComponents([base,...ticks.filter((x):x is {slot:number;receivedAt:number}=>Boolean(x))],
     Date.now(),this.maxAgeMs,this.maxSlotSkew);
    if(checked.ok)readyPools++;
   }
@@ -236,6 +246,7 @@ export class LocalWhirlpoolQuoter{
    localErrors:this.localErrors,unsupportedPools:this.unsupportedPools,
    lastLocalAt:this.lastLocalAt,validatedAgainstSdk:this.validatedAgainstSdk,
    validationMismatches:this.validationMismatches,
+   verifiedUninitializedTickArrays:this.verifiedUninitializedTickArrays,
    errors:[...this.errors,...[...this.lastErrorReason.entries()].slice(0,3).map(([pool,reason])=>pool+': '+reason)].slice(0,10)};
  }
  forget(pool:string){
