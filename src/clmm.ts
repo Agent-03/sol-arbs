@@ -238,7 +238,7 @@ export class ClmmMonitor {
     poolSlot:cache.slot,feeRaw:estimate.fee.toString(),
     tickArraysObservedAt:cache.observedAt,tickArraySlot:cache.tickArraySlot,
     quoteModel:'raydium_clmm_sdk_tick_array',
-    snapshotIntegrity:cache.verifiedCache?'same_context_cached':'multi_rpc_context_unverified'
+    snapshotIntegrity:cache.verifiedCache?'bounded_slot_cached':'multi_rpc_context_unverified'
    };
   }catch{return null;}
  }
