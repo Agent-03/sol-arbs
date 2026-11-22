@@ -79,7 +79,7 @@ test('owner checks reject corrupt events; dependency health fails closed on stal
  feed.ingest(a,info(10),20,'websocket',at);
  feed.ingest(b,info(11),30,'websocket',at);
  assert.equal(feed.snapshot(at+200).pools[0].state,'slot_skew');
- feed.ingest(b,info(12),21,'websocket',at+200);
+ feed.ingest(a,info(12),29,'websocket',at+200);
  assert.equal(feed.snapshot(at+400).readyPools,1);
  assert.equal(feed.snapshot(at+1100).pools[0].state,'stale');
  feed.clearDependencies('raydium');
