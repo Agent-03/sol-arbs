@@ -3,7 +3,10 @@ import { PublicKey } from '@solana/web3.js';
 import type {QuoteConfig} from './jupiter.js';
 import type {RpcLimitOptions} from './rpc.js';
 import type {FreshnessRules} from './opportunities.js';
-export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;pools:PublicKey[];maxPools:number;pollIntervalMs:number;staleAfterMs:number;port:number;dataDir:string;ammScanIntervalMs:number;ammMaxSlotSkew:number;orcaScanIntervalMs:number;rpcLimit:RpcLimitOptions;freshness:FreshnessRules;minQuoteLiquidityUsd:number;discoveryRefreshMs:number;noProfitDiscoveryMs:number;b5MaxComponentAgeMs:number;b5ReconcileMs:number;b5OrcaRefreshMs:number;b5OrcaMinTriggerMs:number;b5QuoteSizesUsd:number[];b51ClmmMaxPools:number;b51ClmmRefreshMs:number;b51ClmmMaxCacheAgeMs:number;b52OrcaQuoteMode:'fast'|'full';c2LocalQuotesEnabled:boolean;jupiter:QuoteConfig;};
+export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;pools:PublicKey[];maxPools:number;pollIntervalMs:number;staleAfterMs:number;port:number;dataDir:string;ammScanIntervalMs:number;ammMaxSlotSkew:number;orcaScanIntervalMs:number;rpcLimit:RpcLimitOptions;freshness:FreshnessRules;minQuoteLiquidityUsd:number;discoveryRefreshMs:number;noProfitDiscoveryMs:number;b5MaxComponentAgeMs:number;b5ReconcileMs:number;b5OrcaRefreshMs:number;b5OrcaMinTriggerMs:number;b5QuoteSizesUsd:number[];b51ClmmMaxPools:number;b51ClmmRefreshMs:number;b51ClmmMaxCacheAgeMs:number;b52OrcaQuoteMode:'fast'|'full';c2LocalQuotesEnabled:boolean;
+ c3HistoryRpcUrl?:string;c3SamplePoolCount:number;c3SignaturesPerPool:number;
+ c3MaxTransactions:number;c3ScanCooldownMs:number;c3HistoryMinSpacingMs:number;
+ jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
 function nonNegativeNumber(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isFinite(n)||n<0)throw new Error(`${key} must be a nonnegative number`);return n;}
@@ -47,6 +50,16 @@ export function loadConfig():Config{
    if(value!=='fast'&&value!=='full')throw new Error('B5_2_ORCA_QUOTE_MODE must be fast or full');
    return value;
   })(),
+  c3HistoryRpcUrl:(()=>{
+   const url=process.env.C3_HISTORY_RPC_URL||undefined;
+   if(url&&!/^https:\/\//.test(url))throw new Error('C3_HISTORY_RPC_URL must be https://');
+   return url;
+  })(),
+  c3SamplePoolCount:positiveInteger('C3_SAMPLE_POOL_COUNT',4),
+  c3SignaturesPerPool:positiveInteger('C3_SIGNATURES_PER_POOL',8),
+  c3MaxTransactions:positiveInteger('C3_MAX_TRANSACTIONS_PER_SCAN',12),
+  c3ScanCooldownMs:positiveInteger('C3_SCAN_COOLDOWN_MS',300000),
+  c3HistoryMinSpacingMs:positiveInteger('C3_HISTORY_RPC_MIN_SPACING_MS',1500),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};
