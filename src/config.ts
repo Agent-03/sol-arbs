@@ -1,8 +1,10 @@
 import 'dotenv/config';
 import { PublicKey } from '@solana/web3.js';
 import type {QuoteConfig} from './jupiter.js';
-export type Config={rpcUrl:string;wsUrl:string|undefined;pools:PublicKey[];maxPools:number;pollIntervalMs:number;staleAfterMs:number;port:number;dataDir:string;ammScanIntervalMs:number;orcaScanIntervalMs:number;jupiter:QuoteConfig;};
+import type {RpcLimitOptions} from './rpc.js';
+export type Config={rpcUrl:string;wsUrl:string|undefined;pools:PublicKey[];maxPools:number;pollIntervalMs:number;staleAfterMs:number;port:number;dataDir:string;ammScanIntervalMs:number;orcaScanIntervalMs:number;rpcLimit:RpcLimitOptions;jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
+function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
 function nonNegativeNumber(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isFinite(n)||n<0)throw new Error(`${key} must be a nonnegative number`);return n;}
 function sizes():number[]{
  const nums=(process.env.JUPITER_SIZES_USD??'5,10,25,50,80').split(',').map(v=>Number(v.trim()));
@@ -20,6 +22,7 @@ export function loadConfig():Config{
  if(maxPools>100)throw new Error('MAX_DISCOVERED_POOLS cannot exceed 100');
  const apiKey=process.env.JUPITER_API_KEY||undefined;
  return {rpcUrl,wsUrl,pools,maxPools,pollIntervalMs:positiveInteger('POLL_INTERVAL_MS',60000),staleAfterMs:positiveInteger('STALE_AFTER_MS',120000),port:positiveInteger('HEALTH_PORT',8787),dataDir:process.env.DATA_DIR||'./data',ammScanIntervalMs:positiveInteger('AMM_V4_SCAN_INTERVAL_MS',60000),orcaScanIntervalMs:positiveInteger('ORCA_SCAN_INTERVAL_MS',60000),
+  rpcLimit:{minSpacingMs:positiveInteger('RPC_HTTP_MIN_SPACING_MS',1000),maxRetries:nonNegativeInteger('RPC_HTTP_MAX_RETRIES',2),initialBackoffMs:positiveInteger('RPC_HTTP_429_BACKOFF_MS',5000),maxBackoffMs:positiveInteger('RPC_HTTP_429_MAX_BACKOFF_MS',60000)},
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};
