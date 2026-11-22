@@ -1363,8 +1363,8 @@ The shared dual-provider HTTP scheduler now has three traffic classes:
   classification through web3.js, Anchor and the Meteora SDK.
 - `/rpc` now reports per-provider:
   `pendingByPriority`, `inFlightByPriority`,
-  `priorityDispatches`, `queueWaitMsAvg/P95` and
-  `transportMsAvg/P95`, plus oldest queued duration.
+  `priorityDispatches`, `queueWaitMsAvg/P95`,
+  `pacingMsAvg/P95` and `transportMsAvg/P95`, plus oldest queued duration.
 - The DLMM monitor reports which deadline failed before transport
   started (queue/pacing) versus during transport/response processing,
   and the last queue/transport duration per pool.
