@@ -182,3 +182,124 @@ test('C3D.4.1 concurrent per-pool batches refresh all DLMM slots without relaxin
   assert.equal(snap.status,'ready');
  }finally{mon.stop();await feed.stop()}
 });
+
+test('C3D.4.2 one stalled RPC cannot stop subsequent ticks or overlap the same pool',async()=>{
+ const sol=new PublicKey(GRAPH_ASSETS.SOL.mint),token=new PublicKey(pk(120));
+ const owner=new PublicKey(METEORA_DLMM);
+ const pools=Array.from({length:5},(_,i)=>pk(i+30));
+ const mints=new Map<string,{owner:PublicKey;data:Buffer}>();
+ for(let i=0;i<pools.length;i++)for(const address of [pools[i],pk(i+60),pk(i+90)])
+  mints.set(address,{owner,data:Buffer.from([i,13,1])});
+ const stalledPool=[...pools].sort()[0];
+ let release!:()=>void;
+ const stalled=new Promise<void>(resolve=>{release=resolve});
+ const received:string[]=[];
+ const rpc={
+  getMultipleAccountsInfoAndContext:async(keys:PublicKey[])=>{
+   received.push(keys[0].toBase58());
+   if(keys[0].toBase58()===stalledPool)await stalled;
+   return {context:{slot:100},value:keys.map(k=>{
+    const a=mints.get(k.toBase58());
+    return a?{data:a.data,owner:a.owner,lamports:100,executable:false,
+     rentEpoch:0} as AccountInfo<Buffer>:null;
+   })};
+  }
+ } as unknown as Connection;
+ const feed=new MarketDataFeed(rpc);
+ const mon=new MeteoraDlmmMonitor(rpc,feed,{
+  enabled:true,maxPools:5,maxAgeMs:15000,maxSlotSkew:12,
+  refreshMs:8000,concurrency:2,minLiquidityUsd:2500,
+  maxArraysPerSide:3,refreshBudget:2,refreshConcurrency:2,
+  rpcDeadlineMs:230,reindexDeadlineMs:1000
+ },()=>{});
+ const entries=(mon as unknown as {entries:Map<string,unknown>}).entries;
+ const candidates=(mon as unknown as {candidates:unknown[]}).candidates;
+ mon.start();
+ try{
+  for(let i=0;i<pools.length;i++){
+   const address=pools[i],x=pk(i+60),y=pk(i+90);
+   const candidate={address,mintA:sol.toBase58(),mintB:token.toBase58(),
+    liquidityUsd:50000};
+   entries.set(address,{candidate,sdk:{
+    lbPair:{tokenXMint:sol,tokenYMint:token},
+    tokenX:{publicKey:sol},tokenY:{publicKey:token},
+    program:{coder:{accounts:{decode:(name:string)=>name==='lbPair'?
+     {tokenXMint:sol,tokenYMint:token}:{lbPair:new PublicKey(address)}}}},
+    binArrayBitmapExtension:null
+   },binX:[x],binY:[y],bitmap:null,releases:new Map(),
+    lastReindexAt:Date.now(),lastVerifiedAt:0,refreshFailures:0});
+   candidates.push(candidate);
+  }
+  await mon.refresh();
+  let snap=mon.snapshot();
+  assert.equal(snap.refreshCycles,1);
+  assert.equal(snap.rpcTimedOut,1,'stalled request trips its own deadline');
+  assert.equal(snap.refreshInFlight,0,'timeout frees the scheduling slot');
+  assert.equal(snap.outstandingRpcReads,1,'underlying RPC remains per-pool locked');
+  assert.equal(snap.refreshSuccesses,1);
+  assert.equal(snap.refreshedPoolsLastCycle,2);
+  await mon.refresh();
+  snap=mon.snapshot();
+  assert.equal(snap.refreshCycles,2,'later ticks advance independently');
+  assert.equal(snap.refreshAttempts,4,'other pools continue to be verified');
+  assert.equal(received.filter(x=>x===stalledPool).length,1,
+   'no overlapping request for the timed-out pool');
+  assert.equal(snap.outstandingRpcReads,1);
+  release();
+  await new Promise(resolve=>setTimeout(resolve,10));
+  snap=mon.snapshot();
+  assert.equal(snap.outstandingRpcReads,0);
+  assert.equal(snap.rpcLateSettled,1);
+  assert.equal(feed.get(stalledPool),undefined,
+   'late response cannot enter quote cache after timeout');
+ }finally{release();mon.stop();await feed.stop()}
+});
+
+test('C3D.4.2 stuck SDK bin-array recovery cannot block routine account refresh',async()=>{
+ const sol=new PublicKey(GRAPH_ASSETS.SOL.mint),token=new PublicKey(pk(120));
+ const address=pk(50),x=pk(51),y=pk(52);
+ const owner=new PublicKey(METEORA_DLMM);
+ const rpc={getMultipleAccountsInfoAndContext:async(keys:PublicKey[])=>({
+  context:{slot:100},value:keys.map(key=>({
+   data:Buffer.from([1,2]),owner,lamports:100,executable:false,rentEpoch:0
+  } as AccountInfo<Buffer>))
+ })} as unknown as Connection;
+ const feed=new MarketDataFeed(rpc);
+ const mon=new MeteoraDlmmMonitor(rpc,feed,{
+  enabled:true,maxPools:2,maxAgeMs:15000,maxSlotSkew:12,
+  refreshMs:8000,concurrency:2,minLiquidityUsd:2500,
+  maxArraysPerSide:3,refreshBudget:2,refreshConcurrency:2,
+  rpcDeadlineMs:400,reindexDeadlineMs:250,reindexConcurrency:1
+ },()=>{});
+ const entries=(mon as unknown as {entries:Map<string,unknown>}).entries;
+ const candidates=(mon as unknown as {candidates:unknown[]}).candidates;
+ const candidate={address,mintA:sol.toBase58(),mintB:token.toBase58(),
+  liquidityUsd:50000};
+ entries.set(address,{candidate,sdk:{
+  lbPair:{tokenXMint:sol,tokenYMint:token},
+  tokenX:{publicKey:sol},tokenY:{publicKey:token},
+  program:{coder:{accounts:{decode:(name:string)=>name==='lbPair'?
+   {tokenXMint:sol,tokenYMint:token}:{lbPair:new PublicKey(address)}}}},
+  getBinArrayForSwap:async()=>new Promise<never>(()=>{}),
+  binArrayBitmapExtension:null
+ },binX:[x],binY:[y],bitmap:null,releases:new Map(),
+  lastReindexAt:Date.now(),lastVerifiedAt:0,refreshFailures:0,
+  needsReindex:true});
+ candidates.push(candidate);
+ mon.start();
+ try{
+  await mon.refresh();
+  assert.equal(mon.snapshot().refreshSuccesses,1);
+  assert.equal(mon.snapshot().reindexInFlight,1);
+  await mon.refresh();
+  assert.equal(mon.snapshot().refreshCycles,2);
+  assert.ok(mon.snapshot().refreshSuccesses>=2);
+  await new Promise(resolve=>setTimeout(resolve,270));
+  const snap=mon.snapshot();
+  assert.equal(snap.reindexTimedOut,1);
+  assert.equal(snap.reindexInFlight,1,
+   'timed-out SDK work retains underlying per-pool lock');
+  assert.equal(snap.refreshInFlight,0);
+  assert.equal(snap.ready,1,'old verified window remains usable');
+ }finally{mon.stop();await feed.stop()}
+});
