@@ -109,3 +109,55 @@ test('C2 invalidated last-known Orca quotes cannot create research routes',()=>{
  const allInvalid=combineLiveQuotes([ray],[marked,{...orcaSell,invalidated:true}],0.02,liquidity);
  assert.equal(allInvalid.candidates.length,0);
 });
+
+test('C3B fast mode evaluates Raydium -> Orca at exact output without RPC reverse quotes',()=>{
+ const requested:Array<{pool:string;amount:bigint}>=[];
+ const cb=(pool:string,amount:bigint):OrcaQuote|null=>{
+  requested.push({pool,amount});
+  if(pool!=='Orca-1'||amount!==71000000n)return null;
+  return {...orcaSell,inputRaw:amount.toString(),outputRaw:'5060000',
+   quoteModel:'orca_whirlpool_sdk_in_memory'};
+ };
+ const x=combineLiveQuotes([ray],[orcaBuy],0.02,liquidity,[],undefined,cb,['Orca-1']);
+ assert.equal(x.candidates.length,2);
+ assert.equal(x.localReverseHits,1);
+ assert.equal(x.localReverseMisses,0);
+ assert.equal(x.unmatchedReverseLegs,0);
+ assert.deepEqual(requested,[{pool:'Orca-1',amount:71000000n}]);
+ const reverse=x.candidates.find(v=>v.buyPool==='Ray-1');
+ assert.equal(reverse?.inputUsdcRaw,'5000000');
+ assert.equal(reverse?.outputUsdcRaw,'5060000');
+ assert.equal(reverse?.indicativeNetUsd,0.039999999999999994);
+});
+test('C3B refuses invalid cached reverse output even when it appears positive',()=>{
+ const wrong=(pool:string,amount:bigint)=>({...orcaSell,pool,
+  inputRaw:(amount+1n).toString(),outputRaw:'9000000'});
+ const x=combineLiveQuotes([ray],[orcaBuy],0.02,liquidity,[],undefined,wrong,['Orca-1']);
+ assert.equal(x.localReverseHits,0);
+ assert.equal(x.localReverseMisses,1);
+ assert.equal(x.candidates.filter(v=>v.buyPool==='Ray-1').length,0);
+});
+test('C3B compares independent Raydium pools without requiring different venues',()=>{
+ const secondary={...ray,pool:'Ray-2',reserveInRaw:'69000000',
+  reserveOutRaw:'1010000000'};
+ const x=combineLiveQuotes([ray,secondary],[],0.02,new Map([
+  ['Ray-1',250000],['Ray-2',250000]
+ ]));
+ assert.equal(x.candidates.length,2);
+ assert.ok(x.candidates.every(v=>v.buyVenue==='raydium'&&v.sellVenue==='raydium'));
+ assert.ok(x.candidates.every(v=>v.buyPool!==v.sellPool));
+});
+test('C3B same-venue Orca pair needs exact locally quoted second input',()=>{
+ const second={...orcaBuy,pool:'Orca-2',outputRaw:'71000000'};
+ const cb=(pool:string,raw:bigint):OrcaQuote|null=>{
+  if(pool==='Orca-2'&&raw===72000000n)
+   return {...orcaSell,pool,inputRaw:raw.toString(),outputRaw:'5010000'};
+  if(pool==='Orca-1'&&raw===71000000n)
+   return {...orcaSell,pool,inputRaw:raw.toString(),outputRaw:'5020000'};
+  return null;
+ };
+ const x=combineLiveQuotes([], [orcaBuy,second],0.02,
+  new Map([['Orca-1',500000],['Orca-2',500000]]),[],undefined,cb,['Orca-1','Orca-2']);
+ assert.equal(x.candidates.length,2);
+ assert.ok(x.candidates.every(v=>v.buyVenue==='orca'&&v.sellVenue==='orca'));
+});
