@@ -10,6 +10,10 @@ export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;po
  c3GraphRefreshMs:number;c3GraphReconcileMs:number;
  c3GraphMaxPathChecks:number;c3GraphMaxResults:number;
  c3GraphMinLiquidityUsd:number;c3GraphSizesUsd:number[];c3GraphMaxPoolInputBps:number;
+ dualRpcEnabled:boolean;secondaryRpcLimit:RpcLimitOptions;
+ c3dEnabled:boolean;c3dMaxTokens:number;c3dTokenRefreshMs:number;
+ c3dPoolRefreshMs:number;c3dPoolQueryBudget:number;c3dPoolConcurrency:number;
+ c3dMinPoolLiquidityUsd:number;c3dSizesSol:number[];c3dAssumedCostSol:number;
  jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
@@ -32,7 +36,25 @@ export function loadConfig():Config{
  if(maxPools>100)throw new Error('MAX_DISCOVERED_POOLS cannot exceed 100');
  const apiKey=process.env.JUPITER_API_KEY||undefined;
  return {rpcUrl,backupRpcUrl,wsUrl,pools,maxPools,pollIntervalMs:positiveInteger('POLL_INTERVAL_MS',60000),staleAfterMs:positiveInteger('STALE_AFTER_MS',120000),port:positiveInteger('HEALTH_PORT',8787),dataDir:process.env.DATA_DIR||'./data',ammScanIntervalMs:positiveInteger('AMM_V4_SCAN_INTERVAL_MS',60000),ammMaxSlotSkew:positiveInteger('AMM_V4_MAX_SLOT_SKEW',12),orcaScanIntervalMs:positiveInteger('ORCA_SCAN_INTERVAL_MS',60000),
-  rpcLimit:{minSpacingMs:positiveInteger('RPC_HTTP_MIN_SPACING_MS',1000),maxRetries:nonNegativeInteger('RPC_HTTP_MAX_RETRIES',2),initialBackoffMs:positiveInteger('RPC_HTTP_429_BACKOFF_MS',5000),maxBackoffMs:positiveInteger('RPC_HTTP_429_MAX_BACKOFF_MS',60000)},
+  rpcLimit:{
+   minSpacingMs:nonNegativeInteger('RPC_HTTP_MIN_SPACING_MS',150),
+   maxConcurrent:positiveInteger('RPC_HTTP_MAX_CONCURRENT',3),
+   maxRetries:nonNegativeInteger('RPC_HTTP_MAX_RETRIES',2),
+   initialBackoffMs:positiveInteger('RPC_HTTP_429_BACKOFF_MS',5000),
+   maxBackoffMs:positiveInteger('RPC_HTTP_429_MAX_BACKOFF_MS',60000)
+  },
+  dualRpcEnabled:(()=>{
+   const v=process.env.RPC_DUAL_ACTIVE??'1';
+   if(v!=='0'&&v!=='1')throw new Error('RPC_DUAL_ACTIVE must be 0 or 1');
+   return v==='1'&&!!backupRpcUrl;
+  })(),
+  secondaryRpcLimit:{
+   minSpacingMs:nonNegativeInteger('RPC_SECONDARY_HTTP_MIN_SPACING_MS',150),
+   maxConcurrent:positiveInteger('RPC_SECONDARY_HTTP_MAX_CONCURRENT',3),
+   maxRetries:nonNegativeInteger('RPC_HTTP_MAX_RETRIES',2),
+   initialBackoffMs:positiveInteger('RPC_HTTP_429_BACKOFF_MS',5000),
+   maxBackoffMs:positiveInteger('RPC_HTTP_429_MAX_BACKOFF_MS',60000)
+  },
   freshness:{maxAgeMs:positiveInteger('B4_MAX_QUOTE_AGE_MS',15000),maxGapMs:positiveInteger('B4_MAX_QUOTE_GAP_MS',4000),maxSlotSkew:positiveInteger('B4_MAX_SLOT_SKEW',12)},
   minQuoteLiquidityUsd:nonNegativeNumber('B4_MIN_POOL_LIQUIDITY_USD',10000),
   discoveryRefreshMs:positiveInteger('DISCOVERY_REFRESH_MS',900000),noProfitDiscoveryMs:positiveInteger('NO_PROFIT_DISCOVERY_MS',300000),
@@ -82,6 +104,19 @@ export function loadConfig():Config{
    return n;
   })(),
   c3GraphSizesUsd:sizes('C3_GRAPH_SIZES_USD','500,2500,5000'),
+  c3dEnabled:(()=>{
+   const value=process.env.C3D_ENABLED??'1';
+   if(value!=='0'&&value!=='1')throw new Error('C3D_ENABLED must be 0 or 1');
+   return value==='1';
+  })(),
+  c3dMaxTokens:positiveInteger('C3D_MAX_TOKENS',50),
+  c3dTokenRefreshMs:positiveInteger('C3D_TOKEN_REFRESH_MS',60000),
+  c3dPoolRefreshMs:positiveInteger('C3D_POOL_REFRESH_MS',45000),
+  c3dPoolQueryBudget:positiveInteger('C3D_POOL_QUERY_BUDGET',80),
+  c3dPoolConcurrency:positiveInteger('C3D_POOL_QUERY_CONCURRENCY',8),
+  c3dMinPoolLiquidityUsd:nonNegativeNumber('C3D_MIN_POOL_LIQUIDITY_USD',5000),
+  c3dSizesSol:sizes('C3D_SIZES_SOL','0.05,0.1,0.25,0.5,1,2'),
+  c3dAssumedCostSol:nonNegativeNumber('C3D_ASSUMED_COST_SOL',0),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};
