@@ -120,3 +120,27 @@ npm.cmd run dev
 Use `http://127.0.0.1:8787/arb` and share the returned JSON status and errors. Keep `.env` private.
 
 **Phase B3 still requires live verification**: confirm SDK dependency compatibility and tick-array fetch behavior, independently compare SDK quote outputs against chain-derived fixture/replay, and measure quote staleness and provider rate-limits. Future work: coherent snapshot quoting, replay journal, compute-budget/tip modeling, actual atomic route transaction construction and simulation—all before real-money trading.
+
+
+## RPC 429 throttling mitigation (Phase B3)
+
+Live terminal logs showed repeated HTTP 429 responses from RPC-backed reads even while WebSocket account events continued to flow. This update reduces requests; it does **not** guarantee that a provider's quota can support the scanner.
+
+**Changes**:
+- Orca Whirlpool pool account is validated and loaded once per monitored pool per scan, rather than once per trade size and route.
+- Tick arrays are refreshed on the first quote for **each swap direction** in a cycle; additional sizes reuse the SDK fetcher's cached tick arrays for that cycle. A fresh pool is fetched at the start of each subsequent cycle. This is a cost-control optimization, **not** a coherent-slot guarantee.
+- When an Orca SDK call ultimately fails with a 429 / rate-limit error, the monitor stops the current scan and waits at least two minutes before trying again; SDK-internal retry warnings may still appear before the call fails.
+- Default quote scan intervals for Orca and Raydium are 60 seconds, pool reconciliation defaults to 60 seconds, and stale-age threshold defaults to 120 seconds. WebSocket updates and event journaling remain enabled.
+- Per-account console noise is off by default; JSONL capture is unchanged. Enable `LOG_ACCOUNT_UPDATES=1` for verbose console output.
+
+**Important for existing installations:** Your local `.env` is not overwritten by `git pull`. If you already have these keys, set them manually:
+
+```dotenv
+POLL_INTERVAL_MS=60000
+STALE_AFTER_MS=120000
+AMM_V4_SCAN_INTERVAL_MS=60000
+ORCA_SCAN_INTERVAL_MS=60000
+LOG_ACCOUNT_UPDATES=0
+```
+
+These defaults are intended only for stable, read-only monitoring and diagnostic investigation; they are too slow to be used as a real-time execution system. Do not interpret delayed quotes as current market profits. If 429s persist, reduce `MAX_DISCOVERED_POOLS`, reduce quote sizes scanned or use a provider rate-limit tier that supports your observed RPC request load. Do **not** disable retries globally or bypass provider rate limits.
