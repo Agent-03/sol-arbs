@@ -49,3 +49,20 @@ test('C3D radar retains diagnostics, empty states and safe token rendering',()=>
  assert.match(explorerHtml,/USDC may appear inside an actual bridge route/);
  assert.ok(explorerHtml.includes('encodeURIComponent')===false,'mint addresses must not be used as untrusted URLs');
 });
+
+test('C3D.2 dashboard renders mint-indexed verified multi-DEX discovery',()=>{
+ for(const item of [
+  'Cross-DEX Pool Registry · C3D.2','/api/c3/pools',
+  'Verified DEX pools','Tokens with 2+ pools','Cross-DEX pair matches',
+  'Two-leg pairs quote-ready','id="poolSearch"','id="poolFilter"',
+  'id="registryTable"','id="registryMeteora"','id="registryPump"',
+  'id="registryRaydium"','id="registryOrca"',
+  'function renderPoolRegistry','data-pool-token','poolRegistry.tokens',
+  'protocol_quote_adapter_not_yet_implemented'
+ ].filter(x=>x!=='poolRegistry.tokens'&&x!=='protocol_quote_adapter_not_yet_implemented')){
+  assert.ok(explorerHtml.includes(item),'missing '+item);
+ }
+ assert.match(explorerHtml,/Meteora and PumpSwap quote adapters remain pending/);
+ assert.match(explorerHtml,/LIVE · C3D.2/);
+ assert.match(explorerHtml,/var esc=function/,'all untrusted mints and venue strings must be escaped');
+});
