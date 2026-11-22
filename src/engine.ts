@@ -191,6 +191,10 @@ export class MarketEngine {
  private onPoolEvent(event:PoolChange){
   if(!this.running||event.source!=='websocket')return;
   const p=this.pools.find(p=>p.address===event.address);
+  if(p?.owner===RAYDIUM_CLMM){
+   this.clmm.requestPoolRefresh(p.address);
+   return;
+  }
   if(p?.owner!==ORCA_WHIRLPOOL)return;
   this.orcaTriggers++;
   this.pendingOrcaPools.add(p.address);
@@ -438,6 +442,8 @@ export class MarketEngine {
     lastUpdatedAt:r.lastUpdatedAt,errors:[...r.errors,...Object.entries(r.poolReasons).map(([key,value])=>key+': '+value)].slice(0,6)},
    clmm:{status:cl.status,selectedPools:cl.selectedPools,readyPools:cl.readyPools,
     quotes:cl.quotes.length,scans:cl.scans,perPool:cl.perPool,
+    poolAccountEvents:cl.poolAccountEvents,selectiveScans:cl.selectiveScans,
+    pendingDirtyPools:cl.pendingDirtyPools,
     lastUpdatedAt:cl.lastUpdatedAt,errors:cl.errors.slice(0,6)},
    orca:{status:o.status,poolCount:o.orcaPools,quotedLegs:o.quotedLegs.length,
     quoteState:o.quoteState,freshLegs:o.freshLegs,expiredLegs:o.expiredLegs,
