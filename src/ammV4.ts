@@ -72,12 +72,12 @@ export class AmmV4Monitor {
  private timer?:ReturnType<typeof setTimeout>;
  private active=false;private busy=false;
  private state:AmmV4Snapshot={status:'idle',quotes:[],errors:[],poolCount:0};
- constructor(private readonly conn:Connection,private readonly pools:DiscoveredPool[],private readonly sizesUsd:number[],private readonly intervalMs=60000,private readonly maxSlotSkew=12){}
+ constructor(private readonly conn:Connection,private readonly pools:DiscoveredPool[],private readonly sizesUsd:number[],private readonly intervalMs=60000,private readonly maxSlotSkew=12,private readonly minLiquidityUsd=0){}
  snapshot():AmmV4Snapshot{return {...this.state,quotes:[...this.state.quotes],errors:[...this.state.errors]};}
  async scanOnce(){
   if(this.busy)return;
   this.busy=true;
-  const supported=this.pools.filter(p=>p.owner===RAYDIUM_AMM_V4&&(p.venue==='raydium'||p.venue==='manual'));
+  const supported=this.pools.filter(p=>p.owner===RAYDIUM_AMM_V4&&(p.venue==='raydium'||p.venue==='manual') && (p.liquidityUsd===undefined||p.liquidityUsd>=this.minLiquidityUsd));
   this.state={...this.state,status:'scanning',poolCount:supported.length,progress:{totalPools:supported.length,completedPools:0,quotesProduced:0}};
   const quotes:AmmV4Quote[]=[],errors:string[]=[];
   try{
