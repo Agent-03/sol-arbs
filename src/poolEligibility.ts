@@ -74,6 +74,8 @@ export function classifyPoolEligibility(
    const meta:Partial<PoolEligibility>={quoteLegs:legs.length,lastObservedAt:latest?.observedAt,
     poolAgeMs:ageMs,tickAgeMs:Number.isFinite(latestTick)?Math.max(0,now-latestTick):undefined,
     tickSlotVerified:latest?.tickArraySlot!=null};
+   if(orca.invalidatedPools?.includes(pool.address))
+    return record('expired','Newer pool/tick state invalidated the last-known Orca quote; exact-input swap not currently available',false,meta);
    if(poolFresh?.refreshing)return record('refreshing','Refreshing Orca SDK data; previous quotes retained',false,meta);
    if(!legs.length)return record('waiting','Awaiting first valid Whirlpool/tick-array quote',false,meta);
    if(ageMs!==undefined&&ageMs>maxQuoteAgeMs)return record('expired','Last Whirlpool quote is older than the comparison threshold',false,meta);
