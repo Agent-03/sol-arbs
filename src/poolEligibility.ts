@@ -1,5 +1,5 @@
 import type {DiscoveredPool} from './discovery.js';
-import {identifyProgram,type VenueProgram} from './routes.js';
+import {identifyProgram,RAYDIUM_CLMM,type VenueProgram} from './routes.js';
 import type {LiveRaydiumSnapshot} from './liveRaydium.js';
 import type {OrcaStatus} from './orca.js';
 import type {ClmmHealth} from './clmm.js';
@@ -21,8 +21,7 @@ export function classifyPoolEligibility(
  maxQuoteAgeMs:number,
  now=Date.now()
 ):PoolEligibility[]{
- const chosen=new Set(clmm.perPool.map(p=>p.pool));
- const eligibleClmm=pools.filter(p=>p.owner=== 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK'&&
+ const eligibleClmm=pools.filter(p=>p.owner===RAYDIUM_CLMM&&
    (p.venue==='raydium'||p.venue==='manual')&&
    (p.liquidityUsd===undefined||p.liquidityUsd>=minLiquidityUsd))
    .sort((a,b)=>(b.liquidityUsd??0)-(a.liquidityUsd??0))
@@ -62,6 +61,7 @@ export function classifyPoolEligibility(
    if(p.status==='refreshing')return record('refreshing','Refreshing Raydium CLMM tick-array SDK snapshot',false,meta);
    if(p.status==='expired'||(ageMs!==undefined&&ageMs>maxQuoteAgeMs))
     return record('expired','CLMM snapshot outside freshness window; tick arrays not same-slot',false,meta);
+   if(!meta.quoteLegs)return record('waiting','CLMM tick arrays fetched but SDK could not produce a valid swap quote',false,meta);
    return record('active','SDK CLMM quote available; tick-array slots not synchronized',true,meta);
   }
   if(program==='orca_whirlpool'){
