@@ -103,7 +103,9 @@ export class MarketEngine {
   this.clmm=new ClmmMonitor(conn,this.pools,this.activeSizesUsd,
    config.minQuoteLiquidityUsd,config.b51ClmmMaxPools,
    config.b51ClmmRefreshMs,config.b51ClmmMaxCacheAgeMs,
-   ()=>this.evaluate('clmm_refresh',Date.now(),false));
+   ()=>this.evaluate('clmm_refresh',Date.now(),false),
+   config.c2LocalQuotesEnabled?this.marketData:undefined,
+   config.freshness.maxSlotSkew);
   this.orca=new OrcaMonitor(conn,this.pools,this.activeSizesUsd,
    ()=>this.ray.snapshot().quotes,config.jupiter.assumedCostUsd,
    config.b5OrcaRefreshMs,config.minQuoteLiquidityUsd,
@@ -113,7 +115,8 @@ export class MarketEngine {
     outputRaw:q.outputRaw,observedAt:q.observedAt,slot:q.poolSlot})),
    config.b52OrcaQuoteMode,
    ()=>this.requestRaydiumAlignment(),
-   this.marketData,this.config.freshness.maxSlotSkew);
+   config.c2LocalQuotesEnabled?this.marketData:undefined,
+   this.config.freshness.maxSlotSkew);
   this.note('info','startup','B5 read-only engine initialized. Raydium vaults: WebSocket state; Orca: SDK refreshes.');
  }
  private note(level:Activity['level'],kind:string,message:string){
@@ -479,6 +482,7 @@ export class MarketEngine {
     pendingDirtyPools:cl.pendingDirtyPools,
     lastUpdatedAt:cl.lastUpdatedAt,errors:cl.errors.slice(0,6)},
    c2:{
+    enabled:this.config.c2LocalQuotesEnabled,
     orcaLocal:o.localPricing??null,
     referenceValidation:o.referenceValidation??null,
     clmmLocal:{scans:cl.scans,quotesFromCachedSdkState:cl.quotes.length,
