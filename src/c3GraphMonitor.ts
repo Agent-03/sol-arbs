@@ -193,28 +193,27 @@ export class C3GraphMonitor{
    const buckets:Candidate[][]=[];
    results.forEach((result,i)=>{
     if(result.status==='fulfilled'){
-     buckets.push(result.value.filter(x=>x.liquidityUsd>=this.options.minLiquidityUsd)
-      .slice(0,this.options.perPair));
+     // Do not select the top 3 Raydium results yet: the public endpoint mixes
+     // AMM V4, CPMM and CLMM. Validate program ownership FIRST so a few
+     // high-liquidity CLMMs do not hide legitimate V4 pools.
+     buckets.push(result.value.filter(x=>x.liquidityUsd>=this.options.minLiquidityUsd));
     }else{
      buckets.push([]);
      this.note('Raydium '+pairs[i].join('/')+' discovery: '+String(result.reason));
     }
    });
-   const picked:Candidate[]=[];const seen=new Set<string>();
-   for(let tier=0;tier<this.options.perPair;tier++)for(const bucket of buckets){
-    if(picked.length>=this.options.maxPools)break;
-    const candidate=bucket[tier];
-    if(candidate&&!seen.has(candidate.address)){
-     seen.add(candidate.address);picked.push(candidate);
-    }
-   }
-   if(!picked.length){
-    this.note('No AMM V4 token-pair candidates in public discovery response');
+   const unique=new Map<string,Candidate>();
+   for(const bucket of buckets)for(const candidate of bucket)
+    if(!unique.has(candidate.address))unique.set(candidate.address,candidate);
+   if(!unique.size){
+    this.note('No pool candidates passed the pair and liquidity filters');
     this.status='partial_error';return;
    }
-   const wanted=new Set<string>();
-   for(let start=0;start<picked.length;start+=75){
-    const block=picked.slice(start,start+75);
+   const entries=[...unique.values()];
+   type Verified={candidate:Candidate;info:AccountInfo<Buffer>;slot:number};
+   const validated=new Map<string,Verified>();
+   for(let start=0;start<entries.length;start+=75){
+    const block=entries.slice(start,start+75);
     const response=await this.rpc.getMultipleAccountsInfoAndContext(
      block.map(p=>new PublicKey(p.address)),'confirmed');
     if(!this.running)return;
@@ -223,19 +222,50 @@ export class C3GraphMonitor{
      const candidate=block[i];
      try{
       const decoded=decodeAmmV4AnyPair(candidate.address,info.data);
-      if(assetOfMint(decoded.baseMint)!==candidate.tokenA||
-       assetOfMint(decoded.quoteMint)!==candidate.tokenB)return;
-      wanted.add(candidate.address);
-      if(this.nodes.has(candidate.address)){
-       this.nodes.get(candidate.address)!.candidate=candidate;
-      }else this.attach(candidate,info,response.context.slot,Date.now());
-     }catch{/* reject other Raydium pool programs */}
+      const onchainA=assetOfMint(decoded.baseMint),onchainB=assetOfMint(decoded.quoteMint);
+      // Raydium API ordering can be reversed; only the real on-chain mint
+      // pair is accepted and used for vault/route orientation.
+      if(!onchainA||!onchainB||
+       !(onchainA===candidate.tokenA&&onchainB===candidate.tokenB||
+         onchainB===candidate.tokenA&&onchainA===candidate.tokenB))return;
+      validated.set(candidate.address,{
+       candidate:{...candidate,tokenA:onchainA,tokenB:onchainB},
+       info,slot:response.context.slot
+      });
+     }catch{/* reject disabled or differently encoded pool states */}
     });
    }
-   // Retain previous subscriptions if discovery failed entirely.
-   if(wanted.size){
-    for(const id of [...this.nodes.keys()])if(!wanted.has(id))this.detach(id);
+   const perPair=buckets.map(bucket=>bucket.flatMap(x=>{
+    const result=validated.get(x.address);
+    return result?[result]:[];
+   }).slice(0,this.options.perPair));
+   const picked:Verified[]=[];const seen=new Set<string>();
+   for(let tier=0;tier<this.options.perPair;tier++){
+    for(const bucket of perPair){
+     if(picked.length>=this.options.maxPools)break;
+     const result=bucket[tier];
+     if(result&&!seen.has(result.candidate.address)){
+      seen.add(result.candidate.address);picked.push(result);
+     }
+    }
+    if(picked.length>=this.options.maxPools)break;
    }
+   if(!picked.length){
+    this.note('No supported AMM V4 accounts found among '+entries.length+
+     ' public Raydium pair candidates; CPMM/CLMM pools require separate quote adapters');
+    this.status='partial_error';return;
+   }
+   const wanted=new Set<string>();
+   for(const result of picked){
+    if(!this.running)return;
+    const {candidate,info,slot}=result;
+    wanted.add(candidate.address);
+    if(this.nodes.has(candidate.address)){
+     this.nodes.get(candidate.address)!.candidate=candidate;
+    }else this.attach(candidate,info,slot,Date.now());
+   }
+   // Retain previous subscriptions when public discovery returns nothing.
+   for(const id of [...this.nodes.keys()])if(!wanted.has(id))this.detach(id);
    this.lastDiscoveryAt=new Date().toISOString();
    await this.reconcile();
    this.status=this.nodes.size?'monitoring':'partial_error';
