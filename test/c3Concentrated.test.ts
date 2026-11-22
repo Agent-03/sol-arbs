@@ -42,12 +42,12 @@ test('C3C parser enforces whitelist, real pool addresses and TVL',()=>{
 });
 test('C3C local CLMM quote participates in chained 2-leg routes without RPC',()=>{
  const seen:Array<{from:string;input:bigint}>=[];
- const pool={...clmm,quoteExactInput:(from:'USDC'|'SOL'|'USDT'|'JUP',raw:bigint)=>{
+ const pool={...clmm,quoteExactInput:(from:string,raw:bigint)=>{
   seen.push({from,input:raw});
   return from==='SOL'?raw*8n/100n:raw*14n;
  }};
  const r=evaluateGraphCycles([base,pool],limits,now+100);
- assert.equal(r.phase,'C3C');
+ assert.equal(r.phase,'C3D.1');
  assert.equal(r.twoLegCycles,2);
  assert.ok(r.candidates.some(x=>x.poolPath.includes(pk(2))));
  assert.ok(seen.length>0);
