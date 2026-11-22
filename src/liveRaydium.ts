@@ -92,6 +92,7 @@ export class LiveRaydiumMonitor{
    }
   }catch(error){
    pool.reason=String(error);
+   pool.components.delete(address);
    this.quotes.delete(pool.address);
    this.error(pool.address+': '+String(error));
    this.notify(pool,slot,receivedAt,source);
@@ -220,7 +221,12 @@ export class LiveRaydiumMonitor{
    for(const pool of this.watched.values()){
     if(!this.running)break;
     try{await this.reconcilePool(pool);}
-    catch(error){pool.reason='reconciliation_failed';this.error(pool.address+': '+String(error));}
+    catch(error){
+     pool.reason='reconciliation_failed';
+     this.quotes.delete(pool.address);
+     this.error(pool.address+': '+String(error));
+     this.notify(pool,0,Date.now(),'reconcile');
+    }
    }
   }finally{this.reconciling=false;}
  }
@@ -235,16 +241,20 @@ export class LiveRaydiumMonitor{
  snapshot():LiveRaydiumSnapshot{
   const sources=this.supported();
   const reasons:Record<string,string>={};
+  const now=Date.now();
   for(const source of sources){
    const p=this.watched.get(source.address);
    if(!p)reasons[source.address]='not_subscribed_or_bootstrap_failed';
    else if(p.reason)reasons[source.address]=p.reason;
    else if(!this.quotes.has(source.address))reasons[source.address]='not_ready';
+   else if([...p.components.values()].some(part=>now-part.receivedAt>this.maxAccountAgeMs))
+    reasons[source.address]='component_age_exceeded';
   }
-  const quotes=[...this.quotes.values()].flat();
+  const valid=new Set(sources.map(p=>p.address).filter(addr=>!reasons[addr]));
+  const quotes=[...this.quotes.entries()].filter(([pool])=>valid.has(pool)).flatMap(([,rows])=>rows);
   return {status:!this.running?'stopped':this.bootstrapping?'bootstrapping':
    Object.keys(reasons).length?'degraded':'ok',
-   poolCount:sources.length,readyPools:this.quotes.size,
+   poolCount:sources.length,readyPools:valid.size,
    subscriptions:[...this.watched.values()].reduce((sum,p)=>sum+p.ids.length,0),
    events:this.events,localRecomputations:this.localRecomputations,
    reconciliations:this.reconciliations,lastUpdateAt:this.lastUpdateAt,
