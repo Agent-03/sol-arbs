@@ -83,7 +83,10 @@ export class MarketEngine {
   private readonly marketData?:MarketDataFeed
  ){
   this.pools=[...discovered.pools];
-  for(const pool of this.pools)this.marketData?.setDependencies(pool.address,[pool.address]);
+  for(const pool of this.pools){
+   this.marketData?.expectOwner(pool.address,pool.owner);
+   this.marketData?.setDependencies(pool.address,[pool.address]);
+  }
   this.activeSizesUsd=config.b52OrcaQuoteMode==='fast'?
    [Math.min(...config.b5QuoteSizesUsd)]:[...config.b5QuoteSizesUsd];
   this.topology=buildCandidates(this.pools);
@@ -293,11 +296,18 @@ export class MarketEngine {
   const next=new Set(result.pools.map(p=>p.address));
   this.discoveryAdded=[...next].filter(p=>!old.has(p)).length;
   this.discoveryRemoved=[...old].filter(p=>!next.has(p)).length;
-  for(const pool of result.pools)if(!this.marketData?.hasDependencies(pool.address))
-   this.marketData?.setDependencies(pool.address,[pool.address]);
+  for(const pool of result.pools){
+   this.marketData?.expectOwner(pool.address,pool.owner);
+   if(!this.marketData?.hasDependencies(pool.address))
+    this.marketData?.setDependencies(pool.address,[pool.address]);
+  }
   await this.scanner.replacePools(result.pools.map(p=>new PublicKey(p.address)));
   this.pools.splice(0,this.pools.length,...result.pools);
   await this.ray.replacePools();
+  // A pool retained in discovery but removed from the *quoted* Raydium
+  // subset still needs its public pool account tracked for diagnostics.
+  for(const pool of this.pools)if(!this.marketData?.hasDependencies(pool.address))
+   this.marketData?.setDependencies(pool.address,[pool.address]);
   for(const address of old)if(!next.has(address))this.marketData?.clearDependencies(address);
   void this.clmm.scanOnce();
   this.topology=buildCandidates(this.pools);
