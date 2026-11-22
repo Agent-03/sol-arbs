@@ -10,7 +10,6 @@ import type {DiscoveredPool} from './discovery.js';
 
 type Candidate={address:string;tokenA:GraphAsset;tokenB:GraphAsset;liquidityUsd:number;
  program:'orca_whirlpool'|'raydium_clmm'};
-const whitelist=new Set(Object.values(GRAPH_ASSETS).map(v=>v.mint));
 const ctxPrefix='c3c:';
 export function parseOrcaGraphCandidates(payload:unknown):Candidate[]{
  const value=payload as {data?:unknown;pools?:unknown};
@@ -55,6 +54,7 @@ export type ConcentratedSnapshot={
  * All path quotes run against cached tick arrays, never a network quote.
  */
 export class C3Concentrated{
+ private readonly allowedMints=new Set<string>();
  private readonly orca:LocalWhirlpoolQuoter;
  private readonly clmm:ClmmMonitor;
  private readonly pools=new Map<string,Candidate>();
@@ -71,15 +71,22 @@ export class C3Concentrated{
   private readonly opts:{maxPools:number;perPair:number;minLiquidityUsd:number;
    maxAgeMs:number;maxSlotSkew:number;refreshMs:number},
   private readonly notify:()=>void){
+  this.setAllowedMints(Object.values(GRAPH_ASSETS).map(x=>x.mint));
   // The Anchor provider's signer is ephemeral and NEVER used to construct or send a transaction.
   const provider=new AnchorProvider(rpc,new Wallet(Keypair.generate()),{commitment:'confirmed'});
   const ctx=WhirlpoolContext.withProvider(provider);
   const client=buildWhirlpoolClient(ctx);
   this.orca=new LocalWhirlpoolQuoter(feed,ctx.program.programId,client.getFetcher(),
-   opts.maxAgeMs,opts.maxSlotSkew,notify,whitelist,ctxPrefix);
+   opts.maxAgeMs,opts.maxSlotSkew,notify,this.allowedMints,ctxPrefix);
   this.clmm=new ClmmMonitor(rpc,[],[5],opts.minLiquidityUsd,
    Math.min(6,opts.maxPools),45000,opts.maxAgeMs,notify,
-   feed,opts.maxSlotSkew,whitelist,ctxPrefix);
+   feed,opts.maxSlotSkew,this.allowedMints,ctxPrefix);
+ }
+ /** Called by the owning C3 graph whenever its active mint registry rotates.
+  * Keeps SDK quote adapters aligned without creating a parallel scanner. */
+ setAllowedMints(mints:readonly string[]){
+  this.allowedMints.clear();
+  for(const mint of mints)this.allowedMints.add(mint);
  }
  private error(error:unknown){this.failures.unshift(String(error));this.failures=this.failures.slice(0,8);}
  private selected(candidates:Candidate[]):Candidate[]{
@@ -193,7 +200,8 @@ export class C3Concentrated{
     quoteExactInput:(from,raw)=>{
      this.quoteAttempts++;
      if(!this.running||raw<=0n){this.quoteMisses++;return null;}
-     const mint=GRAPH_ASSETS[from].mint;
+     const mint=GRAPH_ASSETS[from]?.mint;
+     if(!mint){this.quoteMisses++;return null;}
      const quote=program==='orca_whirlpool'
       ?this.orca.quoteByInputMint(address,mint,raw)
       :this.clmm.quoteByInputMint(address,mint,raw);
