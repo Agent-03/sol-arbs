@@ -435,7 +435,7 @@ export class LocalWhirlpoolQuoter{
    ...(layout.oracleAddress?[this.feed.get(layout.oracleAddress)]:[])];
   if(values.some(x=>!x))return null;
   const observations=values.map(x=>x&&'verifiedSlot' in x?
-   this.verifiedObservation(x):x) as Array<{slot:number;receivedAt:number}>;
+   this.verifiedObservation(x as MarketObservation):x) as Array<{slot:number;receivedAt:number}>;
   const v=validateLocalComponents(observations,
    now,this.maxAgeMs,this.maxSlotSkew);
   if(!v.ok)return null;
