@@ -93,3 +93,39 @@ test('C3A rejects scans without pools and invalid public keys',async()=>{
   assert.equal(sampler.snapshot().completedRuns,0);
  }finally{await rm(dir,{recursive:true,force:true})}
 });
+
+test('C3A accepts version 1 RPC history rather than repeating unsupported version errors',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'sol-arbs-c3-v1-'));
+ try{
+  let requestedVersion:number|undefined;
+  const conn={
+   getSignaturesForAddress:async()=>[{signature:'v1-signature',slot:12345}],
+   getParsedTransaction:async (_signature:string,config?:{maxSupportedTransactionVersion?:number})=>{
+    requestedVersion=config?.maxSupportedTransactionVersion;
+    if(requestedVersion===undefined||requestedVersion<1)
+     throw new Error('Transaction version (1) is not supported by the requesting client.');
+    return {
+     slot:12345,blockTime:1780000000,
+     transaction:{signatures:['v1-signature'],message:{
+      accountKeys:[{pubkey:new PublicKey(Buffer.alloc(32,24)),signer:true,writable:true}],
+      instructions:[],recentBlockhash:'hash'
+     }},
+     meta:{err:null,fee:5000,preBalances:[1000000],postBalances:[995000],
+      preTokenBalances:[],postTokenBalances:[],logMessages:[],innerInstructions:[]}
+    } as unknown as ParsedTransactionWithMeta;
+   }
+  } as unknown as Connection;
+  const sampler=new ChainHistorySampler(conn,dir,{
+   maxSeedPools:1,signaturesPerPool:1,maxTransactions:1,cooldownMs:0,maxRows:5
+  });
+  await sampler.initialize();
+  assert.equal(sampler.request([poolA]).accepted,true);
+  await finished(sampler);
+  const state=sampler.snapshot();
+  assert.equal(requestedVersion,1,'Solana v1 transaction history should be requested explicitly');
+  assert.equal(state.progress.transactionsAnalyzed,1);
+  assert.equal(state.progress.errors,0);
+  assert.equal(state.observations[0].signature,'v1-signature');
+  assert.equal(state.observations[0].profitability,'unverified');
+ }finally{await rm(dir,{recursive:true,force:true})}
+});
