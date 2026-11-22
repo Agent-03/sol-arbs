@@ -31,7 +31,8 @@ export class LastKnownQuoteBook<T extends StoredQuote>{
    pool,refreshing:this.pending.has(pool),lastCompletedAt:this.completedAt.get(pool),
    legs:this.rows.get(pool)?.size??0
   }));
-  return {entries,freshLegs:fresh.length,expiredLegs:entries.length-fresh.length,poolStatus,
-   quoteState:this.pending.size?'refreshing':!entries.length?'warming':fresh.length?'fresh':'expired' as const};
+  const quoteState:'refreshing'|'warming'|'fresh'|'expired'=
+   this.pending.size?'refreshing':!entries.length?'warming':fresh.length?'fresh':'expired';
+  return {entries,freshLegs:fresh.length,expiredLegs:entries.length-fresh.length,poolStatus,quoteState};
  }
 }
