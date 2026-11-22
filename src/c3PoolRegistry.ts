@@ -122,9 +122,10 @@ export function decodeRegistryPoolMints(address:string,info:AccountInfo<Buffer>)
     mintA=readMint(data,88);mintB=readMint(data,120);break;
    }
    case 'meteora_damm_v2':{
-    if(data.length<304||!data.subarray(0,8).equals(DAMM_DISC))return null;
-    // Pool: C-aligned PoolFeesStruct (160 bytes), then two mint keys.
-    mintA=readMint(data,176);mintB=readMint(data,208);break;
+    if(data.length<272||!data.subarray(0,8).equals(DAMM_DISC))return null;
+    // Official DAMM-v2 SDK: discriminator 8 + 160-byte PoolFeesStruct.
+    // POOL_TOKEN_A_MINT_OFFSET=168, POOL_TOKEN_B_MINT_OFFSET=200.
+    mintA=readMint(data,168);mintB=readMint(data,200);break;
    }
    case 'pumpswap_amm':{
     if(data.length<170||!data.subarray(0,8).equals(PUMP_DISC))return null;
