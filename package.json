@@ -15,7 +15,8 @@
     "@orca-so/whirlpools-sdk": "^0.22.0",
     "@orca-so/common-sdk": "^0.7.1",
     "@coral-xyz/anchor": "~0.32.1",
-    "bn.js": "^5.2.2"
+    "bn.js": "^5.2.2",
+    "@raydium-io/raydium-sdk-v2": "0.2.85-alpha"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
