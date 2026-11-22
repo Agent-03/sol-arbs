@@ -44,11 +44,19 @@ export function evaluateRoute(
 export class OrcaMonitor{
  private state:OrcaStatus={status:'idle',quotedLegs:[],routeCandidates:[],errors:[],orcaPools:0};
  private running=false;private timer?:ReturnType<typeof setTimeout>;private busy=false;
+ private rateLimitedUntil=0;
+ private addError(errors:string[],context:string,error:unknown){
+  const detail=String(error);
+  errors.push(`${context}: ${detail}`);
+  if(/\b429\b|too many requests|rate.limit/i.test(detail)){
+   this.rateLimitedUntil=Math.max(this.rateLimitedUntil,Date.now()+120000);
+  }
+ }
  private readonly client:ReturnType<typeof buildWhirlpoolClient>;
  private readonly ctx:WhirlpoolContext;
  constructor(private readonly connection:Connection,private readonly pools:DiscoveredPool[],
    private readonly sizesUsd:number[],private readonly getRaydiumQuotes:()=>AmmV4Quote[],
-   private readonly assumedCostUsd:number,private readonly intervalMs=15000){
+   private readonly assumedCostUsd:number,private readonly intervalMs=60000){
   // Ephemeral, unused local signing identity required by legacy SDK provider.
   // This service NEVER signs or broadcasts transactions.
   const provider=new AnchorProvider(connection,new Wallet(Keypair.generate()),{commitment:'confirmed'});
@@ -80,7 +88,12 @@ export class OrcaMonitor{
    poolSlot,classification:'indicative_non_executable'};
  }
  async scanOnce(){
-  if(this.busy)return;this.busy=true;
+  if(this.busy)return;
+  if(Date.now()<this.rateLimitedUntil){
+   this.state={...this.state,status:'partial_error',errors:[`Rate-limit cooldown active until ${new Date(this.rateLimitedUntil).toISOString()}`]};
+   return;
+  }
+  this.busy=true;
   this.state={...this.state,status:'scanning'};
   const orca=this.pools.filter(p=>p.venue==='orca'&&p.owner===ORCA_WHIRLPOOL);
   const legs:OrcaQuote[]=[],candidates:ArbitrageCandidate[]=[],errors:string[]=[];
@@ -90,12 +103,14 @@ export class OrcaMonitor{
    const bySize=new Map<number,AmmV4Quote[]>();
    for(const q of rayQuotes){const size=Number(BigInt(q.inputRaw))/1e6;bySize.set(size,[...(bySize.get(size)??[]),q]);}
    for(const pool of orca){
+    if(this.rateLimitedUntil>Date.now())break;
     let prepared: {pool:Whirlpool;poolSlot:number};
     try{prepared=await this.preparePool(pool.address);}
-    catch(e){errors.push(`Orca pool ${pool.address}: ${String(e)}`);continue;}
+    catch(e){this.addError(errors,`Orca pool ${pool.address}`,e);if(this.rateLimitedUntil>Date.now())break;continue;}
     let buyTicksRefreshed=false;
     let sellTicksRefreshed=false;
     for(const size of this.sizesUsd){
+     if(this.rateLimitedUntil>Date.now())break;
      const amount=BigInt(Math.round(size*1e6));
      try{
       const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;legs.push(buy);
@@ -107,7 +122,7 @@ export class OrcaMonitor{
         const candidate=evaluateRoute(size,{pool:pool.address,venue:'orca',inputRaw:buy.inputRaw,outputRaw:buy.outputRaw,observedAt:buy.observedAt},
          {pool:ray.pool,venue:'raydium',inputRaw:buy.outputRaw,outputRaw:output.toString(),observedAt:ray.observedAt},this.assumedCostUsd);
         candidates.push(candidate);
-       }catch(e){errors.push(`Orca->Raydium ${pool.address}/${ray.pool}: ${String(e)}`);}
+       }catch(e){this.addError(errors,`Orca->Raydium ${pool.address}/${ray.pool}`,e);}
       }
       // Buy Raydium, sell Orca at EXACT amount produced by first leg.
       for(const ray of bySize.get(size)??[]){
@@ -117,9 +132,9 @@ export class OrcaMonitor{
          {pool:ray.pool,venue:'raydium',inputRaw:ray.inputRaw,outputRaw:ray.outputRaw,observedAt:ray.observedAt},
          {pool:pool.address,venue:'orca',inputRaw:sell.inputRaw,outputRaw:sell.outputRaw,observedAt:sell.observedAt},
          this.assumedCostUsd));
-       }catch(e){errors.push(`Raydium->Orca ${ray.pool}/${pool.address}: ${String(e)}`);}
+       }catch(e){this.addError(errors,`Raydium->Orca ${ray.pool}/${pool.address}`,e);}
       }
-     }catch(e){errors.push(`${pool.address} $${size}: ${String(e)}`);}
+     }catch(e){this.addError(errors,`${pool.address} ${size}`,e);}
     }
    }
   }finally{
