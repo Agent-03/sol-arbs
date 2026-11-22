@@ -7,6 +7,7 @@ import {JupiterMonitor} from './jupiter.js';
 import {RpcProviderPool} from './rpcFailover.js';
 import {MarketEngine} from './engine.js';
 import {dashboardHtml} from './dashboard.js';
+import {explorerHtml} from './explorerDashboard.js';
 
 async function main(){
  const config=loadConfig();
@@ -33,10 +34,10 @@ async function main(){
    res.end(JSON.stringify(data));
   };
   try{
-   if(path==='/'&&req.method==='GET'){
+   if((path==='/'||path==='/terminal')&&req.method==='GET'){
     res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store',
      'x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
-    res.end(dashboardHtml);
+    res.end(path==='/terminal'?dashboardHtml:explorerHtml);
     return;
    }
    if(req.method==='POST'&&(path==='/api/actions/scan'||path==='/api/actions/discover')){
@@ -51,6 +52,24 @@ async function main(){
    if(req.method!=='GET'){send(405,{error:'Method not allowed'});return;}
    const dashboard=()=>engine.dashboard();
    if(path==='/api/dashboard'){send(200,dashboard());return;}
+   if(path==='/api/explorer'){
+    const d=dashboard();
+    const candidates=engine.assessment().candidates;
+    const orca=engine.getOrca().quotedLegs;
+    const raydium=engine.getRaydium().quotes;
+    const clmm=engine.getClmm().quotes;
+    send(200,{
+     mode:'READ_ONLY',observedAt:d.now,market:'SOL/USDC',phase:d.phase,
+     summary:{status:d.status,opportunities:d.opportunities,
+      utility:d.discovery.utility,orca:d.orca,clmm:d.clmm,
+      raydium:d.raydium,b5:d.b5,scan:d.scan,rpc:d.rpc},
+     routes:candidates,quotes:{orca,raydium,clmm},
+     pools:d.discovery.eligibility,events:d.activity,
+     transactionIndexing:false,
+     notice:'These are indicative quote observations, NOT settled Solana transactions. No signatures, wallet fills, or realized profits are available.'
+    });
+    return;
+   }
    if(path==='/rpc'){send(200,rpcLimiter.snapshot());return;}
    if(path==='/health'){
     const s=scanner.snapshot(),d=dashboard();
@@ -115,7 +134,8 @@ async function main(){
   }
  });
  server.listen(config.port,'127.0.0.1',()=>{
-  console.log('SOL ARB dashboard http://127.0.0.1:'+config.port+'/');
+  console.log('SOL ARB activity explorer http://127.0.0.1:'+config.port+'/');
+  console.log('Original monitoring dashboard http://127.0.0.1:'+config.port+'/terminal');
   console.log('Market metrics http://127.0.0.1:'+config.port+'/api/dashboard');
  });
  jupiter.start();
