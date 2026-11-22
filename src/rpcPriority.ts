@@ -5,6 +5,7 @@ export type RpcTiming={
  phase:'started'|'completed';
  priority:RpcPriority;
  queueWaitMs:number;
+ pacingWaitMs?:number;
  transportMs?:number;
  status?:number;
 };
