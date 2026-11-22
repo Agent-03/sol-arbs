@@ -12,6 +12,7 @@ import {METEORA_DLMM,type RegistryPool} from './c3PoolRegistry.js';
 import {GRAPH_ASSETS,assetOfMint,type GraphPool} from './c3Graph.js';
 import {validateLocalComponents} from './localWhirlpool.js';
 import type {MarketDataFeed,MarketObservation} from './marketData.js';
+import {withRpcPriority,type RpcTiming} from './rpcPriority.js';
 
 export type DlmmPoolReadiness={
  address:string;pair:string;status:'ready'|'warming'|'not_ready';
@@ -20,6 +21,8 @@ export type DlmmPoolReadiness={
  refreshFailures:number;refreshing:boolean;notReadyForMs:number|null;
  refreshDurationMs:number|null;reindexing:boolean;readTimedOut:boolean;
  lastTimeoutAt?:string;readySince?:string;continuousReadyMs:number|null;
+ rpcQueueWaitMs?:number;rpcTransportMs?:number;rpcTimeoutCause?:string;
+ windowBinIndex?:number;
 };
 export type DlmmHealth={
  status:'disabled'|'warming'|'ready'|'partial_error'|'stopped';
@@ -38,6 +41,9 @@ export type DlmmHealth={
  refreshDurationMsAvg:number;reindexInFlight:number;reindexAttempts:number;
  reindexSuccesses:number;reindexFailures:number;reindexTimedOut:number;
  bootstrapInFlight:number;
+ bootstrapConcurrency:number;bootstrapDeferred:number;
+ windowShiftReindexes:number;periodicReindexesRemoved:boolean;
+ queueDeadlineExceeded:number;transportDeadlineExceeded:number;
 };
 type Candidate={address:string;mintA:string;mintB:string;liquidityUsd:number};
 type Entry={
@@ -49,6 +55,8 @@ type Entry={
  refreshDurationMs?:number;readTimedOut?:boolean;lastTimeoutAt?:number;
  readySince?:number;reindexing?:boolean;reindexRetryAfter?:number;
  reindexFailures?:number;
+ windowBinIndex?:number;rpcQueueWaitMs?:number;rpcTransportMs?:number;
+ rpcTimeoutCause?:string;rpcPhase?:'queued'|'transport'|'completed';
 };
 type Observed={data:Buffer;verifiedAt:number;verifiedSlot:number;owner:string};
 const ctxPrefix='c3dlmm:';
@@ -109,12 +117,15 @@ export class MeteoraDlmmMonitor{
  private rpcTimedOut=0;private rpcLateSettled=0;private partialRefreshes=0;
  private reindexAttempts=0;private reindexSuccesses=0;private reindexFailures=0;
  private reindexTimedOut=0;
+ private bootstrapDeferred=0;private windowShiftReindexes=0;
+ private queueDeadlineExceeded=0;private transportDeadlineExceeded=0;
  private readonly timings:number[]=[];
  private readonly rpcDeadlineMs:number;private readonly reindexDeadlineMs:number;
  private readonly maxOutstandingRpc:number;private readonly maxOutstandingReindex:number;
  private readonly refreshBudget:number;private readonly refreshConcurrency:number;
  private readonly effectiveRefreshMs:number;
  private readonly reindexConcurrency:number;
+ private readonly bootstrapConcurrency:number;
  private lastRefreshAt?:string;
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
   private readonly opts:{
@@ -122,6 +133,7 @@ export class MeteoraDlmmMonitor{
    refreshMs:number;concurrency:number;minLiquidityUsd:number;maxArraysPerSide:number;
    refreshBudget?:number;refreshConcurrency?:number;
    rpcDeadlineMs?:number;reindexDeadlineMs?:number;reindexConcurrency?:number;
+   bootstrapConcurrency?:number;
   },
   private readonly onChange:()=>void){
   if(!Number.isSafeInteger(opts.maxPools)||opts.maxPools<1||opts.maxPools>40||
@@ -142,11 +154,15 @@ export class MeteoraDlmmMonitor{
   this.reindexDeadlineMs=opts.reindexDeadlineMs??Math.max(2500,Math.min(12000,
    opts.maxAgeMs-1000));
   const reindexConcurrency=opts.reindexConcurrency??2;
+  this.bootstrapConcurrency=opts.bootstrapConcurrency??1;
   if(!Number.isSafeInteger(this.rpcDeadlineMs)||this.rpcDeadlineMs<200||
    this.rpcDeadlineMs>=opts.maxAgeMs||
    !Number.isSafeInteger(this.reindexDeadlineMs)||this.reindexDeadlineMs<200||
    !Number.isSafeInteger(reindexConcurrency)||reindexConcurrency<1||
-   reindexConcurrency>4)throw Error('Invalid C3D.4.2 RPC/reindex timeout settings');
+   reindexConcurrency>4||
+   !Number.isSafeInteger(this.bootstrapConcurrency)||
+   this.bootstrapConcurrency<1||this.bootstrapConcurrency>3)
+   throw Error('Invalid C3D.4.3 RPC/background concurrency settings');
   this.maxOutstandingRpc=Math.min(opts.maxPools,
    Math.max(this.refreshConcurrency,this.refreshConcurrency*2));
   this.maxOutstandingReindex=Math.min(opts.maxPools,reindexConcurrency*2);
@@ -262,6 +278,7 @@ export class MeteoraDlmmMonitor{
    this.feed.setDependencies(ctxPrefix+entry.candidate.address,all);
    entry.binX=binX;entry.binY=binY;entry.bitmap=bitmap;
    entry.lastReindexAt=Date.now();entry.needsReindex=false;
+   entry.windowBinIndex=this.poolBinArrayIndex(entry);
    this.verifiedAccountRefreshes++;
   }finally{
    for(const release of newReleases.values())release();
@@ -316,14 +333,15 @@ export class MeteoraDlmmMonitor{
   * RPC read before refreshing already-quotable pools.
   */
  private launchBootstraps(){
-  const free=Math.max(0,this.opts.concurrency-this.pending.size);
+  const free=Math.max(0,this.bootstrapConcurrency-this.pending.size);
   if(!free)return;
   const at=Date.now();
   const queued=this.candidates.filter(x=>!this.entries.has(x.address)&&
    !this.pending.has(x.address)&&
-   (this.bootstrapRetry.get(x.address)?.until??0)<=at).slice(0,free);
-  for(const row of queued){
-   void this.bootstrap(row).then(()=>{
+   (this.bootstrapRetry.get(x.address)?.until??0)<=at);
+  this.bootstrapDeferred+=Math.max(0,queued.length-free);
+  for(const row of queued.slice(0,free)){
+   void withRpcPriority('background',()=>this.bootstrap(row)).then(()=>{
     if(this.running&&this.candidates.some(x=>x.address===row.address))
      this.onChange();
    });
@@ -343,6 +361,20 @@ export class MeteoraDlmmMonitor{
    oldest=Math.min(oldest,observation.verifiedAt);
   }
   return oldest===Number.MAX_SAFE_INTEGER?0:oldest;
+ }
+ /** A bin array owns 70 adjacent bins. A different active-bin array
+  * invalidates the original swap-window selection. Moving *inside* the
+  * same array does not justify expensive SDK reindex RPC.
+  */
+ private poolBinArrayIndex(entry:Entry):number|null{
+  const info=this.observed(entry.candidate.address);
+  if(!info)return null;
+  try{
+   const pool=entry.sdk.program.coder.accounts.decode('lbPair',info.data) as
+    typeof entry.sdk.lbPair;
+   const value=Number(pool.activeId?.toString());
+   return Number.isSafeInteger(value)?Math.floor(value/70):null;
+  }catch{return null}
  }
  private isSolPair(entry:Entry):boolean{
   const sol=GRAPH_ASSETS.SOL.mint;
@@ -369,8 +401,18 @@ export class MeteoraDlmmMonitor{
   this.refreshAttempts++;this.refreshInFlight++;
   entry.refreshing=true;entry.readTimedOut=false;entry.lastAttemptAt=started;
   this.peakRefreshInFlight=Math.max(this.peakRefreshInFlight,this.refreshInFlight);
-  const work=this.feed.reconcile(this.refreshAddresses(entry),
-   'rpc_reconcile',this.rpcDeadlineMs);
+  entry.rpcPhase='queued';
+  const timing=(event:RpcTiming)=>{
+   if(event.phase==='started'){
+    entry.rpcPhase='transport';
+    entry.rpcQueueWaitMs=event.queueWaitMs;
+   }else{
+    entry.rpcPhase='completed';
+    entry.rpcTransportMs=event.transportMs;
+   }
+  };
+  const work=withRpcPriority('quotes',()=>this.feed.reconcile(
+   this.refreshAddresses(entry),'rpc_reconcile',this.rpcDeadlineMs),timing);
   const record={entry,startedAt:started,promise:work,timedOut:false};
   this.rpcReads.set(address,record);
   void work.then(()=>{
@@ -393,6 +435,12 @@ export class MeteoraDlmmMonitor{
    const verdict=this.state(entry);
    entry.lastVerifiedAt=this.oldestVerifiedAt(entry);
    entry.refreshFailures=0;entry.retryAfter=0;
+   entry.rpcTimeoutCause=undefined;
+   const currentWindow=this.poolBinArrayIndex(entry);
+   if(currentWindow!==null&&entry.windowBinIndex!==undefined&&
+      currentWindow!==entry.windowBinIndex&&!entry.needsReindex){
+    entry.needsReindex=true;this.windowShiftReindexes++;
+   }
    entry.quoteFailure=undefined;
    if(verdict.ok){
     this.refreshSuccesses++;this.verifiedAccountRefreshes++;
@@ -421,6 +469,10 @@ export class MeteoraDlmmMonitor{
    entry.readTimedOut=record.timedOut;
    if(record.timedOut){
     this.rpcTimedOut++;entry.lastTimeoutAt=Date.now();
+    entry.rpcTimeoutCause=entry.rpcPhase==='queued'?
+     'queue_or_pacing':'transport_or_response';
+    if(entry.rpcTimeoutCause==='queue_or_pacing')this.queueDeadlineExceeded++;
+    else this.transportDeadlineExceeded++;
    }
    entry.retryAfter=Date.now()+Math.min(15000,
     1200*Math.pow(2,Math.min(4,entry.refreshFailures-1)));
@@ -489,10 +541,10 @@ export class MeteoraDlmmMonitor{
   const due=[...this.entries.values()].filter(entry=>
    !this.reindexes.has(entry.candidate.address)&&
    (entry.reindexRetryAfter??0)<=at&&
-   (entry.needsReindex||at-entry.lastReindexAt>30000))
+   entry.needsReindex)
    .sort((a,b)=>Number(!!b.needsReindex)-Number(!!a.needsReindex)||
     a.lastReindexAt-b.lastReindexAt).slice(0,available);
-  for(const entry of due)void this.reindexEntry(entry);
+  for(const entry of due)void withRpcPriority('background',()=>this.reindexEntry(entry));
  }
  /** Each timer tick dispatches independently of previous ticks.
   * In-flight map locks and a separate bound on underlying transport work
@@ -503,8 +555,6 @@ export class MeteoraDlmmMonitor{
   if(!this.running)return;
   this.refreshCycles++;this.schedulerTicks++;
   this.dispatchedLastTick=0;this.refreshedPoolsLastCycle=0;
-  this.launchBootstraps();
-  this.launchReindexes();
   const at=Date.now();
   const entries=[...this.entries.values()];
   this.skippedInFlight+=entries.filter(e=>this.rpcReads.has(e.candidate.address)).length;
@@ -527,6 +577,10 @@ export class MeteoraDlmmMonitor{
   });
   this.dispatchedLastTick=tasks.length;
   this.refreshedPoolsLastCycle=tasks.length;
+  // Only now allow low-priority work to enqueue. It cannot block
+  // the already-dispatched live quote refreshes.
+  this.launchReindexes();
+  this.launchBootstraps();
   await Promise.allSettled(tasks);
   if(!this.running)return;
   this.status=this.pending.size>0&&!this.entries.size?'warming':
@@ -675,6 +729,10 @@ export class MeteoraDlmmMonitor{
     readTimedOut:entry?.readTimedOut??false,
     lastTimeoutAt:entry?.lastTimeoutAt?
      new Date(entry.lastTimeoutAt).toISOString():undefined,
+    rpcQueueWaitMs:entry?.rpcQueueWaitMs,
+    rpcTransportMs:entry?.rpcTransportMs,
+    rpcTimeoutCause:entry?.rpcTimeoutCause,
+    windowBinIndex:entry?.windowBinIndex,
     readySince:entry?.readySince?new Date(entry.readySince).toISOString():undefined,
     continuousReadyMs:value.ok&&entry?.readySince!==undefined?
      Math.max(0,now-entry.readySince):null};
@@ -716,7 +774,13 @@ export class MeteoraDlmmMonitor{
    refreshDurationMsP95:durationP95,refreshDurationMsAvg:durationAvg,
    reindexInFlight:this.reindexes.size,reindexAttempts:this.reindexAttempts,
    reindexSuccesses:this.reindexSuccesses,reindexFailures:this.reindexFailures,
-   reindexTimedOut:this.reindexTimedOut,bootstrapInFlight:this.pending.size};
+   reindexTimedOut:this.reindexTimedOut,bootstrapInFlight:this.pending.size,
+   bootstrapConcurrency:this.bootstrapConcurrency,
+   bootstrapDeferred:this.bootstrapDeferred,
+   windowShiftReindexes:this.windowShiftReindexes,
+   periodicReindexesRemoved:true,
+   queueDeadlineExceeded:this.queueDeadlineExceeded,
+   transportDeadlineExceeded:this.transportDeadlineExceeded};
  }
  stop(){
   this.running=false;if(this.timer)clearInterval(this.timer);
