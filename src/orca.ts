@@ -99,8 +99,9 @@ export class OrcaMonitor{
    freshLegs:b.freshLegs,expiredLegs:b.expiredLegs,poolFreshness:b.poolStatus,
    tickArraysSlotVerified:false,localPricing:this.local?.snapshot(),routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};
  }
+ hasLocalPricing(pool:string):boolean{return this.local?.hasReadySnapshot(pool)??false;}
  private refreshLocalFromEvent(pool:string){
-  if(!this.local||!this.running)return;
+  if(!this.local)return;
   // Compute from cached account bytes on the WebSocket callback path:
   // no SDK/RPC calls, no observedAt fabrication. Only successful entire
   // generations replace the previously published pool quotes.
