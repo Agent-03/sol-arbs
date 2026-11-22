@@ -32,6 +32,7 @@ export type GraphMonitorOptions={
  registryTtlMs?:number;registryMinLiquidityUsd?:number;
  dlmmEnabled?:boolean;dlmmMaxPools?:number;dlmmConcurrency?:number;
  dlmmRefreshMs?:number;dlmmMaxArraysPerSide?:number;
+ dlmmRefreshBudget?:number;dlmmRefreshConcurrency?:number;
 };
 export type GraphMonitorSnapshot=GraphEvaluation&{
  status:'disabled'|'discovering'|'warming'|'monitoring'|'partial_error'|'stopped';
@@ -147,11 +148,27 @@ export class C3GraphMonitor{
    refreshMs:options.dlmmRefreshMs??8000,
    concurrency:options.dlmmConcurrency??3,
    minLiquidityUsd:options.minLiquidityUsd,
-   maxArraysPerSide:options.dlmmMaxArraysPerSide??3
+   maxArraysPerSide:options.dlmmMaxArraysPerSide??3,
+   refreshBudget:options.dlmmRefreshBudget??8,
+   refreshConcurrency:options.dlmmRefreshConcurrency??4
   },()=>this.scheduleEvaluation());
   if(!options.enabled)this.status='disabled';
  }
- poolRegistrySnapshot():PoolRegistrySnapshot{return this.poolRegistry.snapshot()}
+ /** Refresh readiness against the same current account cache used by graph
+  * edges when /api/c3/pools is requested. Do not publish a stale cached
+  * "ready" state after a pool's bin arrays have aged out.
+  */
+ poolRegistrySnapshot():PoolRegistrySnapshot{
+  const at=Date.now();
+  const raydium=[...this.nodes.values()].map(n=>this.extract(n,at))
+   .filter((p):p is GraphPool=>p!==null);
+  const concentrated=this.concentrated.snapshot(at).pools;
+  const dlmm=this.dlmm.graphPools(at);
+  const reasons=new Map(this.dlmm.snapshot(at).perPool.map(p=>[
+   p.address,p.reason??'awaiting_dlmm_local_quote_snapshot']));
+  this.poolRegistry.observeReady([...raydium,...concentrated,...dlmm],reasons);
+  return this.poolRegistry.snapshot();
+ }
  snapshot():GraphMonitorSnapshot{
   const {pools:_registryPools,tokens:_registryTokens,...poolRegistry}=this.poolRegistry.snapshot();
   return {...this.evaluation,candidates:[...this.evaluation.candidates],
