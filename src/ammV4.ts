@@ -1,9 +1,10 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { SOL_MINT, USDC_MINT, type DiscoveredPool } from './discovery.js';
-import { RAYDIUM_AMM_V4, constantProductAmountOut } from './routes.js';
+import { RAYDIUM_AMM_V4 } from './routes.js';
 
 const TOKEN_PROGRAM='TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const TOKEN_ACCOUNT_LEN=165;
+const AMM_AUTHORITY=PublicKey.findProgramAddressSync([Buffer.from('amm authority')],new PublicKey(RAYDIUM_AMM_V4))[0].toBase58();
 export type AmmV4State={
  address:string;baseVault:string;quoteVault:string;baseMint:string;quoteMint:string;
  baseNeedTakePnl:bigint;quoteNeedTakePnl:bigint;feeNumerator:bigint;feeDenominator:bigint;status:bigint;
@@ -30,9 +31,10 @@ export function decodeAmmV4(address:string,data:Buffer):AmmV4State {
  return {address,baseVault:key(data,336),quoteVault:key(data,368),baseMint,quoteMint,
   baseNeedTakePnl:u64(data,192),quoteNeedTakePnl:u64(data,200),feeNumerator,feeDenominator,status};
 }
-export function decodeVault(data:Buffer,expectedMint:string):bigint {
+export function decodeVault(data:Buffer,expectedMint:string,expectedAuthority?:string):bigint {
  if(data.length!==TOKEN_ACCOUNT_LEN)throw new Error('Expected legacy SPL token account length 165');
  if(key(data,0)!==expectedMint)throw new Error('Token vault mint mismatch');
+ if(expectedAuthority && key(data,32)!==expectedAuthority)throw new Error('Token vault authority mismatch');
  if(data[108]!==1)throw new Error('Token vault not initialized');
  return u64(data,64);
 }
@@ -90,7 +92,7 @@ export class AmmV4Monitor {
      if(vaults.context.slot-snapshot.context.slot>2)throw new Error('Vault snapshot too far from pool slot');
      const [a,b]=vaults.value;
      if(!a||!b||a.owner.toBase58()!==TOKEN_PROGRAM||b.owner.toBase58()!==TOKEN_PROGRAM)throw new Error('Unexpected token-vault program');
-     const base=decodeVault(a.data,state.baseMint),quote=decodeVault(b.data,state.quoteMint);
+     const base=decodeVault(a.data,state.baseMint,AMM_AUTHORITY),quote=decodeVault(b.data,state.quoteMint,AMM_AUTHORITY);
      for(const size of this.sizesUsd){
       const raw=BigInt(Math.round(size*1e6));
       quotes.push(quoteV4(state,base,quote,raw,snapshot.context.slot,vaults.context.slot));
