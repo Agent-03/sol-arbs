@@ -156,7 +156,8 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
    }
   }
  };
- for(const size of limits.sizesUsd){
+ // Spend the bounded CPU budget on the user's largest ($5k) probe first.
+ for(const size of [...new Set(limits.sizesUsd)].sort((a,b)=>b-a)){
   if(truncated)break;
   const input=BigInt(Math.round(size*1_000_000));
   recurse('USDC',input,0,[],new Set<string>(),new Set<GraphAsset>(['USDC']),size);
