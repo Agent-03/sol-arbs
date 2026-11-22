@@ -1,6 +1,7 @@
 import {PublicKey,type Connection,type AccountInfo} from '@solana/web3.js';
 import {decodeAmmV4AnyPair,decodeVault} from './ammV4.js';
-import {RAYDIUM_AMM_V4} from './routes.js';
+import {RAYDIUM_AMM_V4,RAYDIUM_CLMM} from './routes.js';
+import {C3Concentrated,type ConcentratedSnapshot} from './c3Concentrated.js';
 import {RAYDIUM_CPMM,SPL_TOKEN_PROGRAM,CPMM_VAULT_AUTHORITY,
  decodeCpmmPool,decodeCpmmConfig,cpmmEffectiveReserves} from './c3Cpmm.js';
 import {GRAPH_ASSETS,assetOfMint,evaluateGraphCycles,
@@ -11,7 +12,7 @@ const TOKEN_PROGRAM='TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const AMM_AUTHORITY=PublicKey.findProgramAddressSync(
  [Buffer.from('amm authority')],new PublicKey(RAYDIUM_AMM_V4))[0].toBase58();
 type Candidate={address:string;tokenA:GraphAsset;tokenB:GraphAsset;liquidityUsd:number;
- program?:'raydium_amm_v4'|'raydium_cpmm'};
+ program?:'raydium_amm_v4'|'raydium_cpmm'|'raydium_clmm'};
 type Component={owner:string;data:Buffer;slot:number;at:number};
 type PoolWatch={candidate:Candidate;keys:string[];components:Map<string,Component>;release:(()=>void)[]};
 export type GraphMonitorOptions={
@@ -25,6 +26,7 @@ export type GraphMonitorSnapshot=GraphEvaluation&{
  trackedPools:number;watchedAccounts:number;rpcReconciles:number;
  discoveryStats:{apiCandidates:number;validatedV4:number;validatedCpmm:number;selected:number};
  wsUpdates:number;localEvaluations:number;lastDiscoveryAt?:string;
+ concentrated:ConcentratedSnapshot;
  lastReconcileAt?:string;errors:string[];
 };
 const baseline=(options:GraphMonitorOptions):GraphEvaluation=>
@@ -83,6 +85,7 @@ export class C3GraphMonitor{
  private discoveryStats={apiCandidates:0,validatedV4:0,validatedCpmm:0,selected:0};
  private errors:string[]=[];
  private evaluation:GraphEvaluation;
+ private readonly concentrated:C3Concentrated;
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
   private readonly options:GraphMonitorOptions){
   if(!Number.isSafeInteger(options.maxPools)||options.maxPools<1||options.maxPools>40||
@@ -91,11 +94,18 @@ export class C3GraphMonitor{
    !Number.isSafeInteger(options.reconcileMs)||options.reconcileMs<5000)
    throw new Error('Invalid C3 graph monitor configuration');
   this.evaluation=baseline(options);
+  this.concentrated=new C3Concentrated(rpc,feed,{
+   maxPools:Math.min(12,options.maxPools),perPair:Math.min(3,options.perPair),
+   minLiquidityUsd:options.minLiquidityUsd,maxAgeMs:options.maxQuoteAgeMs,
+   maxSlotSkew:options.maxSlotSkew,refreshMs:options.refreshMs
+  },()=>this.scheduleEvaluation());
   if(!options.enabled)this.status='disabled';
  }
  snapshot():GraphMonitorSnapshot{
   return {...this.evaluation,candidates:[...this.evaluation.candidates],
-   status:this.status,trackedPools:this.nodes.size,watchedAccounts:this.byAccount.size,
+   status:this.status,trackedPools:this.nodes.size+this.concentrated.snapshot().health.trackedClmm+
+    this.concentrated.snapshot().health.trackedOrca,
+   watchedAccounts:this.byAccount.size,concentrated:this.concentrated.snapshot().health,
    rpcReconciles:this.rpcReconciles,wsUpdates:this.wsUpdates,
    discoveryStats:{...this.discoveryStats},
    localEvaluations:this.localEvaluations,lastDiscoveryAt:this.lastDiscoveryAt,
@@ -161,6 +171,8 @@ export class C3GraphMonitor{
  private evaluate(){
   const at=Date.now();
   const pools=[...this.nodes.values()].map(p=>this.extract(p,at)).filter((p):p is GraphPool=>p!==null);
+  const extra=this.concentrated.snapshot(at);
+  pools.push(...extra.pools);
   const scanned=evaluateGraphCycles(pools,{
    sizesUsd:this.options.sizesUsd,maxAgeMs:this.options.maxQuoteAgeMs,
    maxGapMs:this.options.maxQuoteGapMs,maxSlotSkew:this.options.maxSlotSkew,
@@ -170,8 +182,9 @@ export class C3GraphMonitor{
   },at);
   // Pools blocked by missing/stale components never reach evaluateGraphCycles.
   // Include them in coverage instead of misleadingly claiming zero stale pools.
-  this.evaluation={...scanned,poolCount:this.nodes.size,
-   stalePools:scanned.stalePools+Math.max(0,this.nodes.size-pools.length)};
+  const tracked=this.nodes.size+extra.health.trackedClmm+extra.health.trackedOrca;
+  this.evaluation={...scanned,poolCount:tracked,
+   stalePools:scanned.stalePools+Math.max(0,tracked-pools.length)};
   this.localEvaluations++;
  }
  private detach(pool:string){
@@ -263,11 +276,14 @@ export class C3GraphMonitor{
     response.value.forEach((info,i)=>{
      if(!info)return;
      const owner=info.owner.toBase58();
-     if(owner!==RAYDIUM_AMM_V4&&owner!==RAYDIUM_CPMM)return;
+     if(owner!==RAYDIUM_AMM_V4&&owner!==RAYDIUM_CPMM&&owner!==RAYDIUM_CLMM)return;
      const candidate=block[i];
      try{
       const mints=owner===RAYDIUM_CPMM
        ?(()=>{const s=decodeCpmmPool(info.data);return [s.mintA,s.mintB] as const})()
+       :owner===RAYDIUM_CLMM
+       ?(()=>{const o=info.data;return [new PublicKey(o.subarray(73,105)).toBase58(),
+           new PublicKey(o.subarray(105,137)).toBase58()] as const})()
        :(()=>{const s=decodeAmmV4AnyPair(candidate.address,info.data);
           return [s.baseMint,s.quoteMint] as const})();
       const onchainA=assetOfMint(mints[0]);
@@ -277,7 +293,8 @@ export class C3GraphMonitor{
          onchainB===candidate.tokenA&&onchainA===candidate.tokenB))return;
       validated.set(candidate.address,{
        candidate:{...candidate,tokenA:onchainA,tokenB:onchainB,
-        program:owner===RAYDIUM_CPMM?'raydium_cpmm':'raydium_amm_v4'},
+        program:owner===RAYDIUM_CPMM?'raydium_cpmm':
+         owner===RAYDIUM_CLMM?'raydium_clmm':'raydium_amm_v4'},
        info,slot:response.context.slot
       });
      }catch{/* unsupported, disabled or differently encoded pool */}
@@ -287,9 +304,15 @@ export class C3GraphMonitor{
     .filter(v=>v.candidate.program==='raydium_amm_v4').length;
    this.discoveryStats.validatedCpmm=[...validated.values()]
     .filter(v=>v.candidate.program==='raydium_cpmm').length;
+   const clmmCandidates=[...validated.values()].filter(x=>x.candidate.program==='raydium_clmm')
+    .map(x=>({address:x.candidate.address,tokenA:x.candidate.tokenA,
+      tokenB:x.candidate.tokenB,liquidityUsd:x.candidate.liquidityUsd}));
+   // SDK CLMM bootstrap never blocks V4/CPMM subscription startup.
+   void this.concentrated.setRaydiumCandidates(clmmCandidates).catch(e=>
+    this.note('C3C CLMM: '+String(e)));
    const perPair=buckets.map(bucket=>bucket.flatMap(x=>{
     const result=validated.get(x.address);
-    return result?[result]:[];
+    return result&&result.candidate.program!=='raydium_clmm'?[result]:[];
    }).slice(0,this.options.perPair));
    const picked:Verified[]=[];const seen=new Set<string>();
    for(let tier=0;tier<this.options.perPair;tier++){
@@ -303,7 +326,7 @@ export class C3GraphMonitor{
     if(picked.length>=this.options.maxPools)break;
    }
    this.discoveryStats.selected=picked.length;
-   if(!picked.length){
+   if(!picked.length&&!clmmCandidates.length){
     this.note('No supported AMM V4 or CPMM accounts among '+entries.length+
      ' Raydium pair candidates; other protocols require separate adapters');
     this.status='partial_error';return;
@@ -321,7 +344,7 @@ export class C3GraphMonitor{
    for(const id of [...this.nodes.keys()])if(!wanted.has(id))this.detach(id);
    this.lastDiscoveryAt=new Date().toISOString();
    await this.reconcile();
-   this.status=this.nodes.size?'monitoring':'partial_error';
+   this.status=this.nodes.size||clmmCandidates.length?'monitoring':'partial_error';
   }catch(error){this.note('C3B discovery: '+String(error));this.status='partial_error'}
   finally{this.refreshing=false;this.scheduleEvaluation()}
  }
@@ -355,6 +378,7 @@ export class C3GraphMonitor{
  async start(){
   if(this.running||!this.options.enabled)return;
   this.running=true;
+  this.concentrated.start();
   this.unsubscribe=this.feed.onUpdate(update=>{
    if(!this.running)return;
    const related=this.byAccount.get(update.address);
@@ -380,6 +404,7 @@ export class C3GraphMonitor{
   if(this.reconcileTimer)clearInterval(this.reconcileTimer);
   if(this.evaluationTimer)clearTimeout(this.evaluationTimer);
   this.unsubscribe?.();this.unsubscribe=undefined;
+  this.concentrated.stop();
   for(const key of [...this.nodes.keys()])this.detach(key);
   this.status='stopped';
  }
