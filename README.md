@@ -198,3 +198,65 @@ Diagnostic endpoint: `http://127.0.0.1:8787/rpc` now includes `mode`, `activePro
 Run `npm.cmd install`, `npm.cmd run build`, `npm.cmd test`, and `npm.cmd run dev` after pulling the latest main branch. This code has **not** been confirmed with your live Alchemy credentials; check `/rpc` and `/arb` after startup. The new backup will not be enabled until you add `SOLANA_BACKUP_RPC_URL` to your existing `.env`.
 
 Official Alchemy Solana RPC documentation: https://www.alchemy.com/rpc/solana
+
+
+## Phase B4 — Live intelligence dashboard, freshness gate, and adaptive pool discovery
+
+Open **`http://127.0.0.1:8787/`** after `npm.cmd run dev`. This is a self-contained, responsive local dashboard. It does **not** require a frontend build, wallet, account, or browser extension.
+
+### Dashboard
+- Live scanner state, quote-cycle counts and next scan, plus Raydium/Orca per-pool progress.
+- Freshness-qualified **research-only** Raydium ↔ Orca route comparisons (not trading signals).
+- Separate **Excluded** tab for stale quotes, large observation gaps, divergent pool slots, and insufficient or unknown pool liquidity.
+- Best *comparable* estimated net, number of comparable/excluded routes, and 48-cycle in-memory history. An empty qualified set displays **NO MATCH**, never a stale profit.
+- Helius/Alchemy RPC request counters, 429s, successful failovers, and active provider; no RPC endpoint URLs or API keys are shown.
+- Supported Raydium AMM v4 / Orca Whirlpool counts versus Raydium CLMM pools that still require another quote engine.
+- Last 10 real engine events (startup, scan results, discovery, errors).
+
+### What happens when no routes are profitable?
+1. A **sequential** Raydium → Orca quote cycle repeats automatically after the previous cycle completes, using the configured scan intervals. This is deliberate: many simultaneous quote refreshes overload limited RPC plans. It never assumes a negative quote stays negative permanently.
+2. If no route passes the freshness/liquidity rules *and* shows a positive indicative net, the engine refreshes the **SOL/USDC** pool universe at most once every 5 minutes by default. With at least one positive comparison, refresh cadence slows to 15 minutes. It validates more candidate pools on chain before selecting the monitored set, keeps the highest-liquidity anchor pools and rotates other supported ones.
+3. Pool rotation updates WebSocket subscriptions for additions/removals without restarting the process. Underliquid pools (default below $10,000 reported TVL) are not sent to the expensive quote adapters; they may still appear in discovery.
+4. Dashboard buttons **Scan now** and **Find more pools** request these actions immediately, subject to busy state and a 30-second / two-minute manual cooldown. They never send trades.
+
+The scanner **does not** broaden beyond SOL/USDC, and it **cannot yet quote Raydium CLMM**. This is a purposeful supported-market scope, not a claim to find every Solana arbitrage opportunity.
+
+### Freshness is not execution readiness
+
+The Phase B4 default comparison gate requires:
+- Each quote response observation within **15 seconds** of the current clock;
+- The two observations no more than **4 seconds** apart;
+- Their reported pool-context slots no more than **12** apart; and
+- Both pools above the configured discovery liquidity floor (**$10,000**).
+
+Those are *research heuristics*, not coherent same-slot snapshots. A returned quote timestamp may postdate the actual state or tick-array RPC read; two RPC providers can have different confirmed slots. The indicated execution cost remains hypothetical and may omit priority fees, transaction landing, DEX mechanics, and MEV. Every result remains **`indicative_only`** and **`executableRoutes: 0`**. Missing or outdated data is never promoted to a trade signal.
+
+### Settings for your existing local `.env`
+
+```dotenv
+# Quote cycle pauses after the previous complete cycle, not wall-clock intervals.
+AMM_V4_SCAN_INTERVAL_MS=60000
+ORCA_SCAN_INTERVAL_MS=60000
+B4_MAX_QUOTE_AGE_MS=15000
+B4_MAX_QUOTE_GAP_MS=4000
+B4_MAX_SLOT_SKEW=12
+B4_MIN_POOL_LIQUIDITY_USD=10000
+DISCOVERY_REFRESH_MS=900000
+NO_PROFIT_DISCOVERY_MS=300000
+```
+
+Leave your existing Helius/Alchemy/Jupiter keys unchanged and private. The dashboard works with or without the optional Alchemy backup.
+
+### APIs
+- `GET /` — live dashboard
+- `GET /api/dashboard` — single compact dashboard snapshot: status, metrics, candidates, history, activity, RPC, coverage
+- `POST /api/actions/scan` — request a quote scan (busy/cooldown-protected; localhost-origin checked)
+- `POST /api/actions/discover` — request pool discovery refresh (busy/cooldown-protected)
+- `GET /arb` — backwards-compatible indicative routes, now with the freshness comparison gate; only a capped subset of excluded candidates is returned
+- `GET /routes` — **legacy topology only**, still not quoted
+- `GET /amm-v4`, `/orca`, `/rpc`, `/health` — existing diagnostics
+
+### Important next engineering work
+A stable research dashboard is not an atomic arbitrage bot. For actionable evaluation we still need coherent slot-pinned account snapshots, SDK parity tests, Raydium CLMM support if desired, actual dual-swap transaction construction, transaction simulation, and measured fee/landing/slippage impacts. Long per-quote RPC reads are acceptable for diagnosis but not low-latency execution. No real-money deployment should occur based on Phase B4 alone.
+
+After pulling, run `npm.cmd install`, `npm.cmd run build`, `npm.cmd test`, and `npm.cmd run dev`. The repository changes and tests are committed; they must still pass your local build and live provider validation.
