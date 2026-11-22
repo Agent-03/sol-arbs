@@ -1,0 +1,188 @@
+import {Connection,PublicKey,type EpochInfo} from '@solana/web3.js';
+import {Raydium,PoolUtils} from '@raydium-io/raydium-sdk-v2';
+import BN from 'bn.js';
+import {SOL_MINT,USDC_MINT,type DiscoveredPool} from './discovery.js';
+import {RAYDIUM_CLMM} from './routes.js';
+
+type ClmmSdkData=Awaited<ReturnType<InstanceType<typeof Raydium>['clmm']['getPoolInfoFromRpc']>>;
+type Cached={
+ observedAt:string;finishedAt:string;slot:number;
+ data:ClmmSdkData;epochInfo:EpochInfo;
+ tickArrayCount:number;
+};
+export type ClmmQuote={
+ pool:string;direction:'USDC_TO_SOL'|'SOL_TO_USDC';
+ inputRaw:string;outputRaw:string;observedAt:string;computedAt:string;poolSlot:number;
+ feeRaw:string;tickArraysObservedAt:string;tickArraySlot:null;
+ quoteModel:'raydium_clmm_sdk_tick_array';snapshotIntegrity:'multi_rpc_context_unverified';
+};
+export type ClmmHealth={
+ status:'idle'|'scanning'|'ok'|'partial_error';
+ selectedPools:number;readyPools:number;quotes:ClmmQuote[];
+ errors:string[];perPool:Array<{pool:string;status:'fresh'|'expired'|'missing'|'refreshing';reason?:string;
+   lastObservedAt?:string;ageMs?:number;tickArrays:number;slot?:number}>;
+ scans:number;lastUpdatedAt?:string;
+};
+
+export function isClmmPair(a:string,b:string):boolean{
+ return (a===SOL_MINT&&b===USDC_MINT)||(a===USDC_MINT&&b===SOL_MINT);
+}
+export function validateClmmQuoteOutput(inputRaw:bigint,outputRaw:string):bigint{
+ if(inputRaw<=0n||!/^[0-9]+$/.test(outputRaw))throw new Error('Malformed Raydium CLMM SDK quote');
+ const out=BigInt(outputRaw);
+ if(out<=0n)throw new Error('Zero or negative Raydium CLMM SDK output');
+ return out;
+}
+/**
+ * SDK tick-array-aware CLMM quotes, NOT a spot-price approximation.
+ * SDK getPoolInfoFromRpc pulls pool, tick arrays, bitmap/config, and mint
+ * information over separate RPC calls. Since their slots are NOT coherent,
+ * all quotes are indicative and cannot establish executable profitability.
+ */
+export class ClmmMonitor {
+ private sdk?:Raydium;
+ private cache=new Map<string,Cached>();
+ private busy=false;
+ private running=false;
+ private timer?:ReturnType<typeof setTimeout>;
+ private lastUpdatedAt?:string;
+ private errors:string[]=[];
+ private scans=0;
+ private refreshing?:string;
+ private failures=new Map<string,string>();
+
+ constructor(
+  private readonly connection:Connection,
+  private readonly pools:DiscoveredPool[],
+  private readonly sizesUsd:number[],
+  private readonly minLiquidityUsd:number,
+  private readonly maxPools:number,
+  private readonly scanIntervalMs:number,
+  private readonly maxCacheAgeMs:number,
+  private readonly onUpdate:()=>void
+ ){}
+ private chosen():DiscoveredPool[]{
+  return this.pools.filter(p=>p.owner===RAYDIUM_CLMM&&
+   (p.venue==='raydium'||p.venue==='manual')&&
+   (p.liquidityUsd===undefined||p.liquidityUsd>=this.minLiquidityUsd))
+   .sort((a,b)=>(b.liquidityUsd??0)-(a.liquidityUsd??0))
+   .slice(0,this.maxPools);
+ }
+ private async init():Promise<Raydium>{
+  if(!this.sdk)this.sdk=await Raydium.load({connection:this.connection,disableLoadToken:true,disableFeatureCheck:true});
+  return this.sdk;
+ }
+ private selected(cache:Cached,now=Date.now()):boolean{
+  return now-Date.parse(cache.observedAt)<=this.maxCacheAgeMs;
+ }
+ quoteExact(pool:string,direction:'USDC_TO_SOL'|'SOL_TO_USDC',inputRaw:bigint):ClmmQuote|null{
+  const cache=this.cache.get(pool);
+  if(!cache||!this.selected(cache))return null;
+  const {data,epochInfo}=cache;
+  if(!isClmmPair(data.poolInfo.mintA.address,data.poolInfo.mintB.address))return null;
+  if(data.poolInfo.programId!==RAYDIUM_CLMM)return null;
+  const ticks=data.tickData[pool];
+  if(!ticks||!Object.keys(ticks).length)return null;
+  const mint=direction==='USDC_TO_SOL'?USDC_MINT:SOL_MINT;
+  try{
+   const amountIn=new BN(inputRaw.toString());
+   const estimate=PoolUtils.computeAmountOut({
+    poolInfo:data.computePoolInfo,
+    tickarrayBitmapExtension:data.computePoolInfo.exBitmapInfo,
+    tickArrayCache:ticks,
+    baseMint:new PublicKey(mint),
+    amountIn,
+    epochInfo,
+    slippage:0,
+    catchLiquidityInsufficient:false,
+    blockTimestamp:Math.floor(Date.now()/1000)
+   });
+   if(!estimate.allTrade)return null;
+   const outputRaw=estimate.amountOut.amount.toString();
+   validateClmmQuoteOutput(inputRaw,outputRaw);
+   return {
+    pool,direction,inputRaw:inputRaw.toString(),outputRaw,
+    observedAt:cache.observedAt,computedAt:new Date().toISOString(),
+    poolSlot:cache.slot,feeRaw:estimate.fee.toString(),
+    tickArraysObservedAt:cache.observedAt,tickArraySlot:null,
+    quoteModel:'raydium_clmm_sdk_tick_array',
+    snapshotIntegrity:'multi_rpc_context_unverified'
+   };
+  }catch{return null;}
+ }
+ getBuys():ClmmQuote[]{
+  const quotes:ClmmQuote[]=[];
+  for(const pool of this.chosen())for(const size of this.sizesUsd){
+   const q=this.quoteExact(pool.address,'USDC_TO_SOL',BigInt(Math.round(size*1e6)));
+   if(q)quotes.push(q);
+  }
+  return quotes;
+ }
+ async scanOnce(){
+  if(this.busy)return;
+  this.busy=true;this.running=true;
+  try{
+   const sdk=await this.init();
+   const epochInfo=await sdk.fetchEpochInfo();
+   const selected=this.chosen();
+   const valid=new Set(selected.map(p=>p.address));
+   for(const pool of this.cache.keys())if(!valid.has(pool))this.cache.delete(pool);
+   for(const pool of selected){
+    this.refreshing=pool.address;
+    const started=new Date().toISOString();
+    try{
+     const checked=await this.connection.getAccountInfoAndContext(new PublicKey(pool.address),'confirmed');
+     if(!checked.value||checked.value.owner.toBase58()!==RAYDIUM_CLMM)
+      throw new Error('CLMM program owner verification failed');
+     // The Raydium SDK traverses real liquidity ranges and tick arrays.
+     const data=await sdk.clmm.getPoolInfoFromRpc(pool.address);
+     if(data.poolInfo.programId!==RAYDIUM_CLMM||
+       !isClmmPair(data.poolInfo.mintA.address,data.poolInfo.mintB.address))
+      throw new Error('CLMM mint/program mismatch');
+     const ticks=data.tickData[pool.address];
+     if(!ticks||!Object.keys(ticks).length)throw new Error('missing or uninitialized tick arrays');
+     const entry:Cached={observedAt:started,finishedAt:new Date().toISOString(),
+      slot:checked.context.slot,data,epochInfo,tickArrayCount:Object.keys(ticks).length};
+     this.cache.set(pool.address,entry);
+     this.failures.delete(pool.address);
+     this.onUpdate();
+    }catch(e){
+     this.failures.set(pool.address,String(e));
+     this.errors.unshift(pool.address+': '+String(e));
+     this.errors=this.errors.slice(0,10);
+    }
+   }
+   this.scans++;this.lastUpdatedAt=new Date().toISOString();
+  }catch(e){
+   this.errors.unshift('CLMM SDK initialization or scan failed: '+String(e));
+   this.errors=this.errors.slice(0,10);
+  }finally{this.refreshing=undefined;this.busy=false;}
+ }
+ start(){
+  if(this.running)return;
+  this.running=true;
+  const loop=async()=>{
+   if(!this.running)return;
+   await this.scanOnce();
+   if(this.running)this.timer=setTimeout(()=>{void loop();},this.scanIntervalMs);
+  };
+  void loop();
+ }
+ stop(){this.running=false;if(this.timer)clearTimeout(this.timer);}
+ snapshot():ClmmHealth{
+  const now=Date.now();
+  const selected=this.chosen();
+  const perPool=selected.map(p=>{
+   const cache=this.cache.get(p.address);
+   const ageMs=cache?now-Date.parse(cache.observedAt):undefined;
+   const status=this.refreshing===p.address?'refreshing':
+    !cache?'missing':this.selected(cache,now)?'fresh':'expired';
+   return {pool:p.address,status,reason:this.failures.get(p.address),
+    lastObservedAt:cache?.observedAt,ageMs,tickArrays:cache?.tickArrayCount??0,slot:cache?.slot};
+  });
+  const quotes=this.getBuys();
+  return {status:this.busy?'scanning':this.failures.size?'partial_error':'ok',
+   selectedPools:selected.length,readyPools:perPool.filter(p=>p.status==='fresh').length,
+   quotes,errors:[...this.errors],perPool,scans:this.scans,lastUpdatedAt:this.lastUpdatedAt};
+ }
+}
