@@ -21,9 +21,9 @@ export function combineLiveQuotes(
  const candidates:ArbitrageCandidate[]=[];
  let unmatchedReverseLegs=0,failed=0,evaluated=0,clmmEvaluated=0;
  const rays=raydium.filter(r=>r.direction==='USDC_TO_SOL');
- const buys=orca.filter(o=>o.direction==='USDC_TO_SOL');
- const sells=orca.filter(o=>o.direction==='SOL_TO_USDC');
- const orcaPoolCount=new Set(orca.map(q=>q.pool)).size;
+ const buys=orca.filter(o=>o.direction==='USDC_TO_SOL'&&!o.invalidated);
+ const sells=orca.filter(o=>o.direction==='SOL_TO_USDC'&&!o.invalidated);
+ const orcaPoolCount=new Set(orca.filter(q=>!q.invalidated).map(q=>q.pool)).size;
  const emit=(candidate:ArbitrageCandidate,model:'amm_v4'|'clmm')=>{
   candidates.push({...candidate,raydiumModel:model,
    buyLiquidityUsd:poolLiquidity.get(candidate.buyPool),
