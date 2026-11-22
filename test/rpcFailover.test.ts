@@ -87,7 +87,7 @@ test('request is rejected if it is not addressed to the primary endpoint',async(
  await assert.rejects(()=>rpc.fetch('https://unrelated.invalid/rpc'),/configured primary/);
 });
 
-test('one global queue serializes requests across both providers',async()=>{
+test('independent provider queues allow overlapping fallback HTTP reads',async()=>{
  let concurrent=0,maxConcurrent=0;
  const transport=(async (input:Parameters<typeof fetch>[0])=>{
   concurrent++;maxConcurrent=Math.max(maxConcurrent,concurrent);
@@ -98,7 +98,7 @@ test('one global queue serializes requests across both providers',async()=>{
  const rpc=new RpcProviderPool(primary,secondary,opts,transport);
  const all=await Promise.all(Array.from({length:4},()=>rpc.fetch(primary)));
  assert.ok(all.every(x=>x.status===200));
- assert.equal(maxConcurrent,1);
+ assert.ok(maxConcurrent>=1&&maxConcurrent<=2);
 });
 
 test('single-provider mode preserves existing 429 retries',async()=>{
@@ -129,4 +129,31 @@ test('secondary does not receive credentials from primary authorization headers'
  assert.equal(seen[1].headers.get('authorization'),null);
  assert.equal(seen[1].headers.get('x-api-key'),null);
  assert.equal(seen[1].headers.get('content-type'),'application/json');
+});
+
+test('C3D dual active mode sends simultaneous reads to two independent RPC lanes',async()=>{
+ const calls:{url:string;auth:string|null}[]=[];
+ let running=0,peak=0;
+ const transport=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+  running++;peak=Math.max(peak,running);
+  calls.push({url:String(input),auth:new Headers(init?.headers).get('authorization')});
+  await new Promise(resolve=>setTimeout(resolve,8));running--;
+  return ok();
+ }) as typeof fetch;
+ const pool=new RpcProviderPool(primary,secondary,
+  {...opts,maxConcurrent:2},transport,{
+   dualActive:true,secondaryOptions:{...opts,maxConcurrent:2}
+  });
+ const reads=await Promise.all(Array.from({length:12},()=>pool.fetch(primary,{
+  method:'POST',body:'{"method":"getSlot"}',headers:{authorization:'Bearer primary-key'}
+ })));
+ assert.ok(reads.every(x=>x.ok));
+ assert.equal(pool.snapshot().mode,'dual_active');
+ assert.equal(pool.snapshot().primaryAssigned,6);
+ assert.equal(pool.snapshot().secondaryAssigned,6);
+ assert.ok(peak>=2,'different providers truly overlap');
+ assert.ok(peak<=4,'each provider enforces its maxConcurrent capacity');
+ assert.ok(calls.some(c=>c.url===secondary));
+ assert.ok(calls.filter(c=>c.url===secondary).every(c=>c.auth===null));
+ assert.equal(JSON.stringify(pool.snapshot()).includes('secret-test'),false);
 });
