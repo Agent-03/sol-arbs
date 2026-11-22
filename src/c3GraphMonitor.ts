@@ -36,6 +36,7 @@ export type GraphMonitorOptions={
  dlmmRefreshBudget?:number;dlmmRefreshConcurrency?:number;
  dlmmRpcDeadlineMs?:number;dlmmReindexDeadlineMs?:number;
  dlmmReindexConcurrency?:number;
+ dlmmBootstrapConcurrency?:number;
 };
 export type GraphMonitorSnapshot=GraphEvaluation&{
  status:'disabled'|'discovering'|'warming'|'monitoring'|'partial_error'|'stopped';
@@ -156,7 +157,8 @@ export class C3GraphMonitor{
    refreshConcurrency:options.dlmmRefreshConcurrency??4,
    rpcDeadlineMs:options.dlmmRpcDeadlineMs,
    reindexDeadlineMs:options.dlmmReindexDeadlineMs,
-   reindexConcurrency:options.dlmmReindexConcurrency
+   reindexConcurrency:options.dlmmReindexConcurrency,
+   bootstrapConcurrency:options.dlmmBootstrapConcurrency
   },()=>this.scheduleEvaluation());
   if(!options.enabled)this.status='disabled';
  }
