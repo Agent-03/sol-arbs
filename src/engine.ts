@@ -146,8 +146,10 @@ export class MarketEngine {
  }
  private onRaydiumEvent(event:LiveRaydiumEvent){
   if(!this.running||this.busy==='discovering')return;
-  this.marketEvents++;
-  this.lastEventAt=new Date(event.receivedAt).toISOString();
+  if(event.source==='websocket'){
+   this.marketEvents++;
+   this.lastEventAt=new Date(event.receivedAt).toISOString();
+  }
   this.evaluate(event.source==='websocket'?'raydium_ws':'raydium_reconcile',
    event.receivedAt,event.source==='websocket');
  }
