@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {PublicKey} from '@solana/web3.js';
-import {parseOrcaGraphCandidates} from '../src/c3Concentrated.js';
+import {Connection,PublicKey} from '@solana/web3.js';
+import {C3Concentrated,parseOrcaGraphCandidates} from '../src/c3Concentrated.js';
+import {MarketDataFeed} from '../src/marketData.js';
+import type {DiscoveredPool} from '../src/discovery.js';
 import {GRAPH_ASSETS,evaluateGraphCycles,type GraphPool,type GraphScanLimits} from '../src/c3Graph.js';
 
 const pk=(b:number)=>new PublicKey(Buffer.alloc(32,b)).toBase58();
@@ -72,4 +74,42 @@ test('C3C quote failures never become profitable synthetic prices',()=>{
  const r=evaluateGraphCycles([base,bad],limits,now);
  assert.equal(r.twoLegCycles,0);
  assert.equal(r.positiveIndicative,0);
+});
+
+test('C3C.1 starts the CLMM SDK after candidate injection rather than scanning empty pools',async()=>{
+ const rpc=new Connection('https://api.mainnet-beta.solana.com');
+ const feed=new MarketDataFeed(rpc);
+ const concentrated=new C3Concentrated(rpc,feed,{
+  maxPools:6,perPair:3,minLiquidityUsd:50000,maxAgeMs:15000,
+  maxSlotSkew:12,refreshMs:600000
+ },()=>{});
+ let starts=0,scans=0,selected:DiscoveredPool[]=[];
+ const fake={
+  replacePools:(p:DiscoveredPool[])=>{selected=p;},
+  start:()=>{starts++;},
+  scanOnce:async()=>{scans++;},
+  stop:()=>{},
+  snapshot:()=>({status:'idle',scans:0,perPool:[],errors:[],activeTickSubscriptions:0})
+ };
+ const internals=concentrated as unknown as {
+  clmm:typeof fake;running:boolean;clmmStarted:boolean;
+ };
+ internals.clmm=fake;
+ internals.running=true; // do not start live RPC/HTTP pollers in an offline test
+ try{
+  await concentrated.setRaydiumCandidates([]);
+  assert.equal(starts,0,'no empty-universe SDK startup');
+  await concentrated.setRaydiumCandidates([{
+   address:pk(2),tokenA:'USDC',tokenB:'SOL',liquidityUsd:900000
+  }]);
+  assert.equal(starts,1,'first populated universe starts CLMM loop');
+  assert.equal(scans,0,'the started loop owns its own initial SDK scan');
+  assert.equal(selected.length,1);
+  await concentrated.setRaydiumCandidates([{
+   address:pk(3),tokenA:'SOL',tokenB:'USDT',liquidityUsd:900000
+  }]);
+  assert.equal(starts,1,'do not restart CLMM monitor on every discovery');
+  assert.equal(scans,1,'subsequent discovery requests an SDK refresh');
+  assert.equal(selected[0].address,pk(3));
+ }finally{concentrated.stop();await feed.stop()}
 });
