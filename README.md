@@ -69,3 +69,23 @@ Pool registry USD liquidity is indicative and not the same as current executable
 Reference constant-product BigInt math is included for isolated fixtures only. It is **not** connected to Raydium live pool accounts because Raydium AMM v4 requires effective vault-reserve reconstruction, on-chain fee parameters, and correct program-specific rounding. Orca and Raydium concentrated liquidity require full tick-array traversal, not a simplified midpoint or constant-product formula. See the [Orca swap API](https://orca-so.github.io/whirlpools/ts/functions/_orca-so_whirlpools.swapInstructions.html) and [Raydium SDK](https://github.com/raydium-io/raydium-sdk-V2).
 
 **To finish Phase B:** implement and validate program-specific state decoding, fee logic and exact token amount-out for both legs; use coherent pool-account and vault/tick snapshots; replay with realistic age/landing delays; journal candidate outcomes; and verify atomic transaction simulation. Phase B1 should not be represented as a profitable or executable arbitrage engine.
+
+
+## Phase B2 — Raydium AMM v4 on-chain quote adapter (experimental)
+
+New endpoint: `http://127.0.0.1:8787/amm-v4`.
+
+This adapter fetches the Raydium AMM v4 `AmmInfo` account and its two SPL Token vaults, checks the pool program owner, active swap status, account layout size, canonical SOL/USDC mints and vault mint/programs, and calculates amount-out using:
+
+- effective reserves = legacy SPL vault token balances minus accrued `need_take_pnl`
+- per-pool on-chain `swapFeeNumerator`/`swapFeeDenominator`, with integer fee rounding up
+- integer constant-product exact-input quote for the configured USDC trade sizes
+- slot skew rejection when vault data is more than two RPC context slots newer than pool data
+
+The API reports `indicative_non_executable` for every result. Each Raydium quote is a standalone leg; **no Orca price engine has been implemented**, and the adapter does not construct, simulate, or submit an atomic arbitrage transaction. It should never output positive executable route counts based on these quotes.
+
+Raydium's July 2026 change removed AMM v4 OpenBook liquidity from active reserve calculations, making the vault-only reserves minus accrued PnL appropriate for the current upgraded program. See [Raydium AMM v4 accounts](https://github.com/raydium-io/raydium-docs-v1/blob/main/products/amm-v4/accounts.mdx), [fees](https://github.com/raydium-io/raydium-docs-v1/blob/main/products/amm-v4/fees.mdx), and [official SDK layout](https://github.com/raydium-io/raydium-sdk-V2/blob/master/src/raydium/liquidity/layout.ts).
+
+**Pending verification:** Confirm that quotes match current Raydium SDK quote results on real pool snapshots, including rounding and all status variants. Verify RPC snapshot consistency and supported token extensions before promoting any quote to execution grade. This code has not been run against the user's live credentials. Always run `npm.cmd run build` and `npm.cmd test`.
+
+Phase B3 should add complete Orca Whirlpool tick-array traversal, on-chain fee logic and rigorous two-leg same-slot route simulation before any paper-profit labeling.
