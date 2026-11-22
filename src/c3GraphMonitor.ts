@@ -6,6 +6,7 @@ import {PoolInfoLayout} from '@raydium-io/raydium-sdk-v2';
 import {RAYDIUM_CPMM,SPL_TOKEN_PROGRAM,CPMM_VAULT_AUTHORITY,
  decodeCpmmPool,decodeCpmmConfig,cpmmEffectiveReserves} from './c3Cpmm.js';
 import {C3TokenDiscovery,type TokenDiscoveryHealth} from './c3TokenDiscovery.js';
+import {C3PoolRegistry,type PoolRegistrySnapshot} from './c3PoolRegistry.js';
 import {GRAPH_ASSETS,assetOfMint,replaceDynamicGraphAssets,evaluateGraphCycles,
  type GraphAsset,type GraphPool,type GraphEvaluation,type GraphScanLimits} from './c3Graph.js';
 import type {MarketDataFeed} from './marketData.js';
@@ -25,6 +26,9 @@ export type GraphMonitorOptions={
  dynamicDiscoveryEnabled?:boolean;maxTokens?:number;tokenRefreshMs?:number;
  poolRequestBudget?:number;poolQueryConcurrency?:number;apiKey?:string;
  sizesSol?:number[];assumedCostSol?:number;
+ registryEnabled?:boolean;registryTokensPerRefresh?:number;
+ registryConcurrency?:number;registryMaxPools?:number;
+ registryTtlMs?:number;registryMinLiquidityUsd?:number;
 };
 export type GraphMonitorSnapshot=GraphEvaluation&{
  status:'disabled'|'discovering'|'warming'|'monitoring'|'partial_error'|'stopped';
@@ -32,6 +36,7 @@ export type GraphMonitorSnapshot=GraphEvaluation&{
  discoveryStats:{apiCandidates:number;validatedV4:number;validatedCpmm:number;selected:number};
  wsUpdates:number;localEvaluations:number;lastDiscoveryAt?:string;
  concentrated:ConcentratedSnapshot;tokenDiscovery:TokenDiscoveryHealth;
+ poolRegistry:Omit<PoolRegistrySnapshot,'pools'|'tokens'>;
  dynamicPoolDiscovery:{pairQueries:number;rotation:number;queryBudget:number;queryConcurrency:number};
  lastReconcileAt?:string;errors:string[];
 };
@@ -96,6 +101,7 @@ export class C3GraphMonitor{
  private evaluation:GraphEvaluation;
  private readonly concentrated:C3Concentrated;
  private readonly tokenUniverse:C3TokenDiscovery;
+ private readonly poolRegistry:C3PoolRegistry;
  private rotation=0;private lastPairQueries=0;
  private readonly clmmRegistry=new Map<string,{candidate:Candidate;lastSeen:number}>();
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
@@ -115,6 +121,15 @@ export class C3GraphMonitor{
    enabled:!!options.dynamicDiscoveryEnabled,maxTokens:options.maxTokens??50,
    refreshMs:options.tokenRefreshMs??60000,apiKey:options.apiKey
   });
+  this.poolRegistry=new C3PoolRegistry(rpc,{
+   enabled:!!options.dynamicDiscoveryEnabled&&options.registryEnabled!==false,
+   maxTokensPerRefresh:options.registryTokensPerRefresh??20,
+   concurrency:options.registryConcurrency??6,
+   refreshMs:Math.max(10000,options.refreshMs),
+   minLiquidityUsd:options.registryMinLiquidityUsd??options.minLiquidityUsd,
+   maxPools:options.registryMaxPools??350,
+   ttlMs:options.registryTtlMs??20*60_000
+  });
   this.evaluation=baseline(options);
   this.concentrated=new C3Concentrated(rpc,feed,{
    maxPools:Math.min(24,options.maxPools),perPair:Math.min(3,options.perPair),
@@ -123,12 +138,14 @@ export class C3GraphMonitor{
   },()=>this.scheduleEvaluation());
   if(!options.enabled)this.status='disabled';
  }
+ poolRegistrySnapshot():PoolRegistrySnapshot{return this.poolRegistry.snapshot()}
  snapshot():GraphMonitorSnapshot{
+  const {pools:_registryPools,tokens:_registryTokens,...poolRegistry}=this.poolRegistry.snapshot();
   return {...this.evaluation,candidates:[...this.evaluation.candidates],
    status:this.status,trackedPools:this.nodes.size+this.concentrated.snapshot().health.trackedClmm+
     this.concentrated.snapshot().health.trackedOrca,
    watchedAccounts:this.byAccount.size,concentrated:this.concentrated.snapshot().health,
-   tokenDiscovery:this.tokenUniverse.snapshot(),
+   tokenDiscovery:this.tokenUniverse.snapshot(),poolRegistry,
    dynamicPoolDiscovery:{pairQueries:this.lastPairQueries,rotation:this.rotation,
     queryBudget:this.options.poolRequestBudget??0,queryConcurrency:this.options.poolQueryConcurrency??1},
    rpcReconciles:this.rpcReconciles,wsUpdates:this.wsUpdates,
@@ -198,6 +215,7 @@ export class C3GraphMonitor{
   const pools=[...this.nodes.values()].map(p=>this.extract(p,at)).filter((p):p is GraphPool=>p!==null);
   const extra=this.concentrated.snapshot(at);
   pools.push(...extra.pools);
+  this.poolRegistry.observeReady(pools);
   const scanned=evaluateGraphCycles(pools,{
    sizesUsd:this.options.sizesUsd,maxAgeMs:this.options.maxQuoteAgeMs,
    maxGapMs:this.options.maxQuoteGapMs,maxSlotSkew:this.options.maxSlotSkew,
@@ -267,6 +285,7 @@ export class C3GraphMonitor{
   try{
    const dynamic=!!this.options.dynamicDiscoveryEnabled;
    let pairs:Array<[GraphAsset,GraphAsset]>=[];
+   let registryTask:Promise<void>|undefined;
    if(dynamic){
     await this.tokenUniverse.refresh();
     if(!this.running)return;
@@ -277,6 +296,10 @@ export class C3GraphMonitor{
      t.mint!==GRAPH_ASSETS.USDT.mint&&t.mint!==GRAPH_ASSETS.JUP.mint);
     replaceDynamicGraphAssets(tokens);
     this.concentrated.setAllowedMints(Object.values(GRAPH_ASSETS).map(x=>x.mint));
+    // Run cross-DEX discovery simultaneously with Raydium pair metadata.
+    // A bad third-party endpoint never blocks the existing graph scanner.
+    registryTask=this.poolRegistry.refresh(dynamicTokens.map(t=>t.mint))
+     .catch(error=>this.note('C3D.2 registry refresh: '+String(error)));
     // SOL is always the route root. USDC and USDT are bridge assets.
     const anchors:Array<[GraphAsset,GraphAsset]>=[
      ['SOL','USDC'],['SOL','USDT'],['USDC','USDT'],['SOL','JUP'],['USDC','JUP']
@@ -322,6 +345,32 @@ export class C3GraphMonitor{
      this.note('Raydium '+pairs[i].join('/')+' discovery: '+String(result.reason));
     }
    });
+   if(registryTask)await registryTask;
+   if(!this.running)return;
+   // Owner+mint-verified registry pools extend Raydium pair discovery.
+   // Other venues are mapped separately, never injected into V4/CPMM math.
+   const registry=this.poolRegistry.supported();
+   const supplementary=new Map<string,Candidate[]>();
+   for(const item of registry)if(item.venue==='raydium'){
+    const a=assetOfMint(item.mintA),b=assetOfMint(item.mintB);
+    if(!a||!b||a===b)continue;
+    const candidate:Candidate={address:item.address,tokenA:a,tokenB:b,
+     liquidityUsd:item.liquidityUsd,program:item.program as Candidate['program']};
+    const group=[a,b].sort().join(':');
+    const rows=supplementary.get(group)??[];
+    rows.push(candidate);supplementary.set(group,rows);
+   }
+   for(const group of supplementary.values()){
+    group.sort((a,b)=>b.liquidityUsd-a.liquidityUsd);
+    buckets.push(group);
+   }
+   this.concentrated.setRegistryOrcaCandidates(registry
+    .filter(x=>x.venue==='orca'&&x.program==='orca_whirlpool')
+    .flatMap(x=>{
+     const a=assetOfMint(x.mintA),b=assetOfMint(x.mintB);
+     return a&&b&&a!==b?[{address:x.address,tokenA:a,tokenB:b,
+      liquidityUsd:x.liquidityUsd}]:[];
+    }));
    const unique=new Map<string,Candidate>();
    for(const bucket of buckets)for(const candidate of bucket)
     if(!unique.has(candidate.address))unique.set(candidate.address,candidate);
@@ -477,7 +526,7 @@ export class C3GraphMonitor{
   if(this.reconcileTimer)clearInterval(this.reconcileTimer);
   if(this.evaluationTimer)clearTimeout(this.evaluationTimer);
   this.unsubscribe?.();this.unsubscribe=undefined;
-  this.concentrated.stop();
+  this.concentrated.stop();this.poolRegistry.stop();
   for(const key of [...this.nodes.keys()])this.detach(key);
   this.status='stopped';
  }
