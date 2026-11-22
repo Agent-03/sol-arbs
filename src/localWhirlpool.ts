@@ -248,11 +248,13 @@ export class LocalWhirlpoolQuoter{
   }
   const valid=validateLocalComponents(observations,now,this.maxAgeMs,this.maxSlotSkew);
   if(!valid.ok){this.lastErrorReason.set(pool,valid.reason??'invalid');return null;}
-  const componentKey=[decoded.observation.hash,decoded.observation.slot,
+  // Exact-input swap feasibility depends on account bytes, not notification
+  // slots. Re-verifying identical bytes at a newer slot must not retry a
+  // deterministic tick-traversal failure on every event.
+  const componentKey=[decoded.observation.hash,
    ...required.map(({address})=>{
-    const state=this.feed.get(address);
-    const absent=this.feed.getVerifiedAbsent(address);
-    return state?state.hash+':'+state.slot:absent?'absent:'+absent.slot:'unknown';
+    const state=this.feed.get(address),absent=this.feed.getVerifiedAbsent(address);
+    return state?state.hash:absent?'verified_uninitialized':'unknown';
    })].join('|');
   if(this.failureGate.blocked(pool,direction,inputRaw,componentKey))return null;
   try{
@@ -293,9 +295,9 @@ export class LocalWhirlpoolQuoter{
   const required=this.tickKeys(pool,decoded.data,
    direction==='USDC_TO_SOL'?decoded.data.tokenMintA.toBase58()===USDC_MINT:
     decoded.data.tokenMintA.toBase58()===SOL_MINT);
-  const fingerprint=[decoded.observation.hash,decoded.observation.slot,...required.map(({address})=>{
+  const fingerprint=[decoded.observation.hash,...required.map(({address})=>{
    const state=this.feed.get(address),absent=this.feed.getVerifiedAbsent(address);
-   return state?state.hash+':'+state.slot:absent?'absent:'+absent.slot:'unknown';
+   return state?state.hash:absent?'verified_uninitialized':'unknown';
   })].join('|');
   return fingerprint===failure.componentKey;
  }
