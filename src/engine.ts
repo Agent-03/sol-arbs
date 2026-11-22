@@ -17,7 +17,7 @@ type Activity={id:number;at:string;level:'info'|'success'|'warning';kind:string;
 type History={at:string;comparable:number;positive:number;excluded:number;bestNetUsd:number|null;total:number};
 type Busy='idle'|'quoting'|'discovering'|'bootstrapping';
 type EventSource='raydium_ws'|'raydium_reconcile'|'orca_refresh'|'clmm_refresh';
-const emptyCombination=():LiveCombination=>({candidates:[],unmatchedReverseLegs:0,failed:0,evaluated:0,clmmEvaluated:0});
+const emptyCombination=():LiveCombination=>({candidates:[],unmatchedReverseLegs:0,failed:0,evaluated:0,clmmEvaluated:0,localReverseHits:0,localReverseMisses:0});
 
 export class MarketEngine {
  private readonly pools:DiscoveredPool[];
@@ -165,7 +165,13 @@ export class MarketEngine {
   const clmmBuys=this.clmm.getBuys();
   this.combination=combineLiveQuotes(rayQuotes,orcaLegs,
    this.config.jupiter.assumedCostUsd,liquidity,clmmBuys,
-   (pool,amount)=>this.clmm.quoteExact(pool,'SOL_TO_USDC',amount));
+   (pool,amount)=>this.clmm.quoteExact(pool,'SOL_TO_USDC',amount),
+   this.config.c2LocalQuotesEnabled?
+    (pool,amount)=>this.orca.quoteLocalExact(pool,'SOL_TO_USDC',amount):undefined,
+   this.pools.filter(p=>p.owner===ORCA_WHIRLPOOL&&
+    (p.venue==='orca'||p.venue==='manual')&&
+    (p.liquidityUsd===undefined||p.liquidityUsd>=this.config.minQuoteLiquidityUsd))
+    .map(p=>p.address));
   this.liveCandidates=this.combination.candidates;
   this.localEvaluations++;
   if(recordEvent)this.marketEventEvaluations++;
@@ -411,8 +417,8 @@ export class MarketEngine {
    {label:'Unprofitable',count:comparison.negativeComparable,reason:'Valid research comparisons with net ≤ 0'},
    {label:'Positive estimate',count:comparison.positiveComparable,reason:'Positive estimate; not simulated or executable'},
    {label:'Stale / unaligned',count:comparison.excluded,reason:'Time, slot or liquidity checks failed'},
-   {label:'Missing reverse route',count:this.config.b52OrcaQuoteMode==='fast'?0:this.combination.unmatchedReverseLegs,
-    reason:this.config.b52OrcaQuoteMode==='fast'?'Reverse direction deliberately paused in fast diagnostic mode':'No exact-input Orca reverse quote for Raydium leg'}
+   {label:'Missing exact reverse quote',count:this.combination.unmatchedReverseLegs,
+    reason:'No valid exact-input Orca reverse quote from local state or cached SDK result'}
   ];
   const reasons=Object.entries(comparison.excludedByReason).sort((a,b)=>b[1]-a[1]);
   return {
@@ -424,7 +430,10 @@ export class MarketEngine {
     lastDurationMs:this.lastScanDurationMs,completedCycles:this.cycles,
     intervalMs:this.config.b5OrcaRefreshMs,nextAt:this.nextScanAt},
    b5:{quoteMode:this.config.b52OrcaQuoteMode,activeSizesUsd:[...this.activeSizesUsd],
-    monitoredDirections:this.config.b52OrcaQuoteMode==='fast'?['orca_to_raydium_amm_v4','orca_to_raydium_clmm']:['orca_to_raydium_amm_v4','orca_to_raydium_clmm','raydium_amm_v4_to_orca','raydium_clmm_to_orca'],
+    monitoredDirections:this.config.c2LocalQuotesEnabled||this.config.b52OrcaQuoteMode==='full'?
+     ['orca_to_raydium_amm_v4','orca_to_raydium_clmm','raydium_amm_v4_to_orca',
+      'raydium_clmm_to_orca','raydium_to_raydium','orca_to_orca','clmm_to_clmm']:
+     ['orca_to_raydium_amm_v4','orca_to_raydium_clmm','raydium_to_raydium'],
     architecture:'Raydium WebSocket pool/vault cache + local route math; Orca SDK refreshed on a bounded schedule',
     raydiumTransport:'WebSocket + periodic coherent-context HTTP reconciliation',
     orcaTransport:'SDK/RPC refreshed on pool changes with cooldown, plus periodic refresh',
@@ -441,15 +450,17 @@ export class MarketEngine {
     latency:this.percentiles(),latencyDefinition:'Milliseconds from local update callback receipt to local route recomputation (not chain-to-bot latency)',
     routeEvaluations:this.combination.evaluated,
     clmmEvaluations:this.combination.clmmEvaluated,
-    exactInputMisses:this.config.b52OrcaQuoteMode==='fast'?0:this.combination.unmatchedReverseLegs,
-    unmonitoredReverseDirections:this.config.b52OrcaQuoteMode==='fast',
+    exactInputMisses:this.combination.unmatchedReverseLegs,
+    localReverseHits:this.combination.localReverseHits,
+    localReverseMisses:this.combination.localReverseMisses,
+    unmonitoredReverseDirections:!this.config.c2LocalQuotesEnabled&&this.config.b52OrcaQuoteMode==='fast',
     scanTiming:{durationMs:o.lastScanDurationMs,firstBuyMs:o.lastFirstBuyDelayMs,
       poolPreparationMs:o.lastPoolSetupMs,buyQuotes:o.lastBuyCount,reverseQuotes:o.lastReverseCount},
     evaluationFailures:this.combination.failed,
     statuses,topExclusionReason:reasons[0]?.[0]??null,
     limitations:['Orca SDK tick arrays use RPC, not a fully memory-resident quote engine',
      'CLMM SDK pool/tick bitmap snapshots involve multiple independent RPC contexts',
-     'Raydium vault-only CPMM ignores OpenBook open orders',
+     'Raydium AMM V4 pool-vault model is unverified for atomic execution',
      'Slot proximity does not imply atomic same-state execution',
      'No transaction simulation, signing or broadcast']},
    discovery:{status:this.discoveryStatus,lastAt:this.lastDiscoveryAt,
