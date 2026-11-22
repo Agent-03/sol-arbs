@@ -42,6 +42,7 @@ export type DlmmHealth={
  reindexSuccesses:number;reindexFailures:number;reindexTimedOut:number;
  bootstrapInFlight:number;
  bootstrapConcurrency:number;bootstrapDeferred:number;
+ bootstrapPhysicalInFlight:number;
  windowShiftReindexes:number;periodicReindexesRemoved:boolean;
  queueDeadlineExceeded:number;transportDeadlineExceeded:number;
 };
@@ -110,6 +111,7 @@ export class MeteoraDlmmMonitor{
  private refreshFailures=0;private refreshInFlight=0;private peakRefreshInFlight=0;
  private refreshedPoolsLastCycle=0;private recoveryCount=0;
  private readonly bootstrapRetry=new Map<string,{until:number;failures:number}>();
+ private readonly bootstrapPhysical=new Map<string,Promise<unknown>>();
  private readonly rpcReads=new Map<string,{entry:Entry;startedAt:number;promise:Promise<void>;timedOut:boolean}>();
  private readonly reindexes=new Map<string,{entry:Entry;startedAt:number;promise:Promise<void>}>();
  private schedulerTicks=0;private dispatchedLastTick=0;
@@ -284,13 +286,24 @@ export class MeteoraDlmmMonitor{
    for(const release of newReleases.values())release();
   }
  }
+ private trackBootstrapWork<T>(address:string,work:Promise<T>):Promise<T>{
+  this.bootstrapPhysical.set(address,work);
+  void work.then(()=>{
+   if(this.bootstrapPhysical.get(address)===work)this.bootstrapPhysical.delete(address);
+  },()=>{
+   if(this.bootstrapPhysical.get(address)===work)this.bootstrapPhysical.delete(address);
+  });
+  return work;
+ }
  private async bootstrap(candidate:Candidate){
-  if(!this.running||this.entries.has(candidate.address)||this.pending.has(candidate.address))return;
+  if(!this.running||this.entries.has(candidate.address)||
+   this.pending.has(candidate.address)||this.bootstrapPhysical.has(candidate.address))return;
   this.pending.add(candidate.address);this.bootstrapAttempts++;
   let entry:Entry|undefined;
   try{
    const sdk=await this.withDeadline(
-    DLMM.create(this.rpc,new PublicKey(candidate.address)),
+    this.trackBootstrapWork(candidate.address,
+     DLMM.create(this.rpc,new PublicKey(candidate.address))),
     this.reindexDeadlineMs,'dlmm_bootstrap_timeout');
    if(!this.running)return;
    const a=sdk.lbPair.tokenXMint.toBase58(),b=sdk.lbPair.tokenYMint.toBase58();
@@ -306,8 +319,9 @@ export class MeteoraDlmmMonitor{
     releases:new Map(),lastReindexAt:0};
    let active=true;
    try{
-    await this.withDeadline(this.updateArrays(entry,()=>active&&this.running&&
-     this.candidates.some(c=>c.address===candidate.address)),
+    await this.withDeadline(this.trackBootstrapWork(candidate.address,
+     this.updateArrays(entry,()=>active&&this.running&&
+     this.candidates.some(c=>c.address===candidate.address))),
      this.reindexDeadlineMs,'dlmm_bootstrap_arrays_timeout');
    }finally{active=false}
    if(!this.running||!this.candidates.some(x=>x.address===candidate.address)){
@@ -333,11 +347,12 @@ export class MeteoraDlmmMonitor{
   * RPC read before refreshing already-quotable pools.
   */
  private launchBootstraps(){
-  const free=Math.max(0,this.bootstrapConcurrency-this.pending.size);
+  const free=Math.max(0,this.bootstrapConcurrency-
+   new Set([...this.pending,...this.bootstrapPhysical.keys()]).size);
   if(!free)return;
   const at=Date.now();
   const queued=this.candidates.filter(x=>!this.entries.has(x.address)&&
-   !this.pending.has(x.address)&&
+   !this.pending.has(x.address)&&!this.bootstrapPhysical.has(x.address)&&
    (this.bootstrapRetry.get(x.address)?.until??0)<=at);
   this.bootstrapDeferred+=Math.max(0,queued.length-free);
   for(const row of queued.slice(0,free)){
@@ -777,6 +792,7 @@ export class MeteoraDlmmMonitor{
    reindexTimedOut:this.reindexTimedOut,bootstrapInFlight:this.pending.size,
    bootstrapConcurrency:this.bootstrapConcurrency,
    bootstrapDeferred:this.bootstrapDeferred,
+   bootstrapPhysicalInFlight:this.bootstrapPhysical.size,
    windowShiftReindexes:this.windowShiftReindexes,
    periodicReindexesRemoved:true,
    queueDeadlineExceeded:this.queueDeadlineExceeded,
