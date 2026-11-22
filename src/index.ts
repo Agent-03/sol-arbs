@@ -4,71 +4,125 @@ import {loadConfig} from './config.js';
 import {discoverPools} from './discovery.js';
 import {Scanner} from './scanner.js';
 import {JupiterMonitor} from './jupiter.js';
-import {buildCandidates} from './routes.js';
-import {AmmV4Monitor} from './ammV4.js';
-import {OrcaMonitor} from './orca.js';
 import {RpcProviderPool} from './rpcFailover.js';
+import {MarketEngine} from './engine.js';
+import {dashboardHtml} from './dashboard.js';
+
 async function main(){
  const config=loadConfig();
+ const manualPools=[...config.pools];
  const jupiter=new JupiterMonitor(config.jupiter);
- jupiter.start();
  const rpcLimiter=new RpcProviderPool(config.rpcUrl,config.backupRpcUrl,config.rpcLimit);
- const validationConnection=new Connection(config.rpcUrl,{commitment:'confirmed',wsEndpoint:config.wsUrl,fetch:rpcLimiter.fetch,disableRetryOnRateLimit:true});
- const discovered=await discoverPools(validationConnection,config.pools,config.maxPools);
- for(const warning of discovered.warnings)console.warn('[discovery]',warning);
- if(!discovered.pools.length)console.warn('No validated pool accounts found: pool feed disabled; Jupiter quote monitor remains read-only.');
- config.pools=discovered.pools.map(p=>new PublicKey(p.address));
- const routes=buildCandidates(discovered.pools);
- const ammV4=new AmmV4Monitor(validationConnection,discovered.pools,config.jupiter.sizesUsd,config.ammScanIntervalMs,config.ammMaxSlotSkew);
- await ammV4.scanOnce();
- ammV4.start();
- const orca=new OrcaMonitor(validationConnection,discovered.pools,config.jupiter.sizesUsd,()=>ammV4.snapshot().quotes,config.jupiter.assumedCostUsd,config.orcaScanIntervalMs);
- orca.start();
- console.log(JSON.stringify({event:'discovery_complete',pools:discovered.pools.length,routeCandidates:routes.candidates.length,rejectedPools:routes.rejectedPools,warnings:discovered.warnings}));
- const scanner=new Scanner(config,validationConnection);
- const server=createServer((req,res)=>{
-  const path=req.url?.split('?')[0];
-  if(!['/health','/pools','/discovery','/jupiter','/routes','/amm-v4','/orca','/arb','/rpc'].includes(path??'')){
-   res.writeHead(404);res.end('Not found');return;
-  }
-  const snapshot=scanner.snapshot();
-  const status=path==='/health'&&snapshot.status!=='healthy'?503:200;
-  res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});
-  if(path==='/health'){
-   res.end(JSON.stringify({status:snapshot.status,lastPollAt:snapshot.lastPollAt,errors:snapshot.errors,trackedPools:snapshot.pools.length,stalePools:snapshot.pools.filter(p=>p.stale).length,jupiter:jupiter.snapshot().status,routeCandidates:routes.candidates.length,executableRoutes:0,rpc:rpcLimiter.snapshot()}));
-  }else if(path==='/discovery')res.end(JSON.stringify(discovered));
-  else if(path==='/rpc')res.end(JSON.stringify(rpcLimiter.snapshot()));
-  else if(path==='/jupiter')res.end(JSON.stringify(jupiter.snapshot()));
-  else if(path==='/amm-v4')res.end(JSON.stringify({...ammV4.snapshot(),note:'AMM v4 pool-level standalone indicative quotes only. No complete cross-DEX opportunity or executable transaction.'}));
-  else if(path==='/orca')res.end(JSON.stringify({...orca.snapshot(),raydiumQuoteStatus:ammV4.snapshot().status,raydiumQuoteCount:ammV4.snapshot().quotes.length,raydiumErrors:ammV4.snapshot().errors}));
-  else if(path==='/arb'){
-   const state=orca.snapshot();
-   res.end(JSON.stringify({status:state.status,updatedAt:state.lastUpdatedAt,indicativeRoutes:state.routeCandidates.length,executableRoutes:0,raydiumQuoteStatus:ammV4.snapshot().status,raydiumQuoteCount:ammV4.snapshot().quotes.length,raydiumErrors:ammV4.snapshot().errors,rpc:rpcLimiter.snapshot(),
-    candidates:state.routeCandidates.sort((a,b)=>b.indicativeNetUsd-a.indicativeNetUsd).slice(0,100),errors:state.errors,
-    warning:'Quote-only cross-venue estimates. Not executable; not atomic; fees/landing risk not verified.'}));
-  }
-  else if(path==='/routes'){
-   const state=new Map(snapshot.pools.map(p=>[p.address,p]));
-   const candidates=routes.candidates.map(candidate=>{
-    const buy=state.get(candidate.buyPool),sell=state.get(candidate.sellPool);
-    const rejectionReasons:string[]=[];
-    if(!buy||!sell||buy.stale||sell.stale)rejectionReasons.push('stale_or_missing_pool_state');
-    if(buy?.slot!==undefined&&sell?.slot!==undefined&&Math.abs(buy.slot-sell.slot)>2)rejectionReasons.push('pool_slot_mismatch');
-    rejectionReasons.push('missing_exact_swap_quoters');
-    return {...candidate,buySlot:buy?.slot??null,sellSlot:sell?.slot??null,
-      rejectionReasons,executable:false,estimatedNetUsd:null};
-   });
-   res.end(JSON.stringify({phase:'B1',status:'discovery_only',executableRoutes:0,observedAt:new Date().toISOString(),
-    metrics:{discoveredPools:discovered.pools.length,eligiblePools:routes.capabilities.length-routes.rejectedPools,
-      rejectedPools:routes.rejectedPools,candidateRoutes:candidates.length,stalePools:snapshot.pools.filter(p=>p.stale).length},
-    capabilities:routes.capabilities,candidates,
-    warning:'Route topology only. No exact quotes, transaction simulation, or realized profitability available.'}));
-  }else res.end(JSON.stringify(snapshot));
+ const connection=new Connection(config.rpcUrl,{
+  commitment:'confirmed',wsEndpoint:config.wsUrl,fetch:rpcLimiter.fetch,disableRetryOnRateLimit:true
  });
- server.listen(config.port,'127.0.0.1',()=>console.log(`http://127.0.0.1:${config.port}/routes`));
- const stop=async()=>{jupiter.stop();ammV4.stop();orca.stop();server.close();await scanner.stop();};
+ const discovered=await discoverPools(connection,manualPools,config.maxPools);
+ for(const warning of discovered.warnings)console.warn('[discovery]',warning);
+ config.pools=discovered.pools.map(p=>new PublicKey(p.address));
+ const scanner=new Scanner(config,connection);
+ const engine=new MarketEngine(connection,config,scanner,rpcLimiter,jupiter,discovered,manualPools);
+ console.log(JSON.stringify({event:'discovery_complete',pools:discovered.pools.length,
+  validatedCandidateAccounts:discovered.validatedCount,
+  theoreticalRoutes:engine.getTopology().candidates.length,warnings:discovered.warnings}));
+
+ const server=createServer((req,res)=>{
+  const path=(req.url??'/').split('?')[0];
+  const send=(status:number,data:unknown)=>{
+   res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store',
+    'x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
+   res.end(JSON.stringify(data));
+  };
+  try{
+   if(path==='/'&&req.method==='GET'){
+    res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store',
+     'x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
+    res.end(dashboardHtml);
+    return;
+   }
+   if(req.method==='POST'&&(path==='/api/actions/scan'||path==='/api/actions/discover')){
+    // Loopback only: reject cross-site browser POSTs (no write actions on chain).
+    const allowed='http://127.0.0.1:'+config.port;
+    const origin=req.headers.origin;
+    if(origin && origin!==allowed){send(403,{accepted:false,message:'Foreign origin rejected'});return;}
+    const result=path.endsWith('/scan')?engine.requestScan():engine.requestDiscovery();
+    send(result.accepted?202:429,result);
+    return;
+   }
+   if(req.method!=='GET'){send(405,{error:'Method not allowed'});return;}
+   const dashboard=()=>engine.dashboard();
+   if(path==='/api/dashboard'){send(200,dashboard());return;}
+   if(path==='/rpc'){send(200,rpcLimiter.snapshot());return;}
+   if(path==='/health'){
+    const s=scanner.snapshot(),d=dashboard();
+    send(s.status==='healthy'?200:503,{status:s.status,lastPollAt:s.lastPollAt,errors:s.errors,
+     trackedPools:s.pools.length,stalePools:s.pools.filter(p=>p.stale).length,
+     scan:d.scan,opportunities:{comparable:d.opportunities.comparable,positive:d.opportunities.positive},
+     rpc:rpcLimiter.snapshot(),executableRoutes:0});
+    return;
+   }
+   if(path==='/pools'){send(200,scanner.snapshot());return;}
+   if(path==='/discovery'){send(200,engine.getDiscovered());return;}
+   if(path==='/jupiter'){send(200,jupiter.snapshot());return;}
+   if(path==='/amm-v4'){
+    send(200,{...engine.getRaydium(),note:'Indicative non-executable AMM v4 pool quotes only.'});return;
+   }
+   if(path==='/orca'){
+    const r=engine.getRaydium();
+    send(200,{...engine.getOrca(),raydiumQuoteStatus:r.status,raydiumQuoteCount:r.quotes.length,
+     raydiumErrors:r.errors});return;
+   }
+   if(path==='/arb'){
+    const d=dashboard(),o=d.opportunities;
+    send(200,{phase:'B4',status:d.status,updatedAt:d.now,
+     indicativeRoutes:o.total,comparableRoutes:o.comparable,excludedRoutes:o.excluded,
+     positiveComparable:o.positive,bestComparableNetUsd:o.bestComparableNetUsd,
+     executableRoutes:0,raydiumQuoteStatus:d.raydium.status,raydiumQuoteCount:d.raydium.quotes,
+     raydiumErrors:d.raydium.errors,errors:d.orca.errors,
+     freshnessRules:o.rules,excludedByReason:o.excludedByReason,
+     candidates:[...o.comparableRoutes,...o.excludedRoutes],
+     rpc:d.rpc,
+     warning:'Freshness-qualified only for research. Independent, non-atomic quotes. Execution and landing costs remain unverified.'});
+    return;
+   }
+   if(path==='/routes'){
+    const s=scanner.snapshot();
+    const states=new Map(s.pools.map(p=>[p.address,p]));
+    const topo=engine.getTopology();
+    const candidates=topo.candidates.map(candidate=>{
+     const buy=states.get(candidate.buyPool),sell=states.get(candidate.sellPool);
+     const rejectionReasons=['topology_only_not_simulated'];
+     if(!buy||!sell||buy.stale||sell.stale)rejectionReasons.push('stale_or_missing_pool_state');
+     if(buy?.slot!=null&&sell?.slot!=null&&Math.abs(buy.slot-sell.slot)>12)rejectionReasons.push('pool_slot_mismatch');
+     return {...candidate,buySlot:buy?.slot??null,sellSlot:sell?.slot??null,
+      rejectionReasons,executable:false,estimatedNetUsd:null};
+    });
+    send(200,{phase:'B1_TOPOLOGY',status:'topology_only',executableRoutes:0,
+     observedAt:new Date().toISOString(),
+     metrics:{discoveredPools:engine.getDiscovered().pools.length,
+      rejectedPools:topo.rejectedPools,candidateRoutes:candidates.length,
+      stalePools:s.pools.filter(p=>p.stale).length},
+     capabilities:topo.capabilities,candidates,
+     warning:'Legacy topology view. Use /arb or /api/dashboard for Phase B4 quote analysis.'});
+    return;
+   }
+   send(404,{error:'Not found'});
+  }catch(error){
+   console.error('HTTP handler failed',error);
+   send(500,{error:'Internal scanner error'});
+  }
+ });
+ server.listen(config.port,'127.0.0.1',()=>{
+  console.log('SOL ARB dashboard http://127.0.0.1:'+config.port+'/');
+  console.log('Market metrics http://127.0.0.1:'+config.port+'/api/dashboard');
+ });
+ jupiter.start();
+ void engine.start().catch(error=>console.error('Engine start failed',error));
+ const stop=async()=>{
+  jupiter.stop();
+  server.close();
+  await engine.stop();
+ };
  process.once('SIGINT',()=>{void stop();});
  process.once('SIGTERM',()=>{void stop();});
- await scanner.start();
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
