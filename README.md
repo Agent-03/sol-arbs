@@ -787,3 +787,34 @@ $g.errors
 A positive `indicativeNetUsd` is **not** realized or executable profit.
 There is no same-slot atomic multi-pool snapshot, transaction simulation,
 precise landing-cost model, confirmed fill, or independently verified P&L.
+
+### C3C.1 — Concentrated pool readiness diagnostics
+
+If `validatedClmm` or `validatedOrca` is greater than `readyClmm` or
+`readyOrca`, the pools exist on chain but their **exact-input local quotes
+are not ready**. This is not evidence of a profitable or failed trade.
+
+C3C.1 waits for Raydium CLMM discovery before starting the SDK refresh loop
+(preventing a zero-pool bootstrap that can skip the first real scan). It also
+reports each tracked concentrated pool's identity, token pair, readiness and
+available missing-account/age/slot-skew reason through `/api/c3/graph`.
+It does **not** relax freshness or tick-array validation.
+
+```powershell
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+$g.concentrated.clmmScan | Format-List
+$g.concentrated.clmmPools |
+  Select-Object pair,pool,status,reason,ageMs,tickArrays,tickArraySlotVerified |
+  Format-Table -AutoSize
+$g.concentrated.orcaPools |
+  Select-Object pair,pool,state,reason | Format-Table -AutoSize
+
+$m = Invoke-RestMethod http://127.0.0.1:8787/api/market-data
+$m.pools | Where-Object { $_.pool -like 'c3c:*' } |
+  Select-Object pool,state,accounts,present,oldestAgeMs,slotSkew |
+  Format-Table -AutoSize
+```
+
+An absent CLMM tick, config or bitmap account, mismatched owner, stale
+component or excessive slot gap keeps its pool **excluded**. Increasing the
+number of tracked pools cannot fix missing/invalid SDK tick snapshots.
