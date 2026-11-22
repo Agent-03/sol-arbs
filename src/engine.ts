@@ -57,6 +57,9 @@ export class MarketEngine {
  private marketEventEvaluations=0;
  private orcaTriggers=0;
  private suppressedTriggers=0;
+ private readonly pendingOrcaPools=new Set<string>();
+ private lastFullOrcaRefreshAt=0;
+ private selectiveOrcaRefreshes=0;
  private latencySamples:number[]=[];
  private lastEvaluationAt?:string;
  private lastEventAt?:string;
@@ -170,6 +173,7 @@ export class MarketEngine {
   const p=this.pools.find(p=>p.address===event.address);
   if(p?.owner!==ORCA_WHIRLPOOL)return;
   this.orcaTriggers++;
+  this.pendingOrcaPools.add(p.address);
   const latestCycle=this.lastOrcaFinishedAt?Date.parse(this.lastOrcaFinishedAt):this.lastOrcaStartedAt;
   if(this.busy!=='idle'||Date.now()-latestCycle<this.config.b5OrcaMinTriggerMs){
    this.suppressedTriggers++;return;
@@ -280,12 +284,19 @@ export class MarketEngine {
   if(!this.running||this.busy!=='idle')return;
   this.busy='quoting';
   const began=Date.now();
+  const fullRefresh=reason==='manual' ||
+    began-this.lastFullOrcaRefreshAt>=this.config.b5OrcaRefreshMs ||
+    this.pendingOrcaPools.size===0;
+  const onlyPools=fullRefresh?undefined:new Set(this.pendingOrcaPools);
+  this.pendingOrcaPools.clear();
   this.lastOrcaStartedAt=began;
   this.lastScanStartedAt=new Date(began).toISOString();
   this.nextScanAt=undefined;
   if(reason==='scheduled')this.note('info','orca','Refreshing Orca SDK quotes; Raydium remains event-driven');
   try{
-   await this.orca.scanOnce();
+   await this.orca.scanOnce(onlyPools);
+   if(fullRefresh)this.lastFullOrcaRefreshAt=Date.now();
+   else this.selectiveOrcaRefreshes++;
    if(!this.running)return;
    this.evaluate('orca_refresh',Date.now(),false);
    const result=this.evaluatedSummary();
@@ -353,6 +364,7 @@ export class MarketEngine {
     marketEvents:this.marketEvents,localRecomputations:r.localRecomputations,
     localEvaluations:this.localEvaluations,eventEvaluations:this.marketEventEvaluations,
     orcaEventTriggers:this.orcaTriggers,coalescedTriggers:this.suppressedTriggers,
+    selectiveOrcaRefreshes:this.selectiveOrcaRefreshes,pendingOrcaPools:this.pendingOrcaPools.size,
     lastMarketEventAt:this.lastEventAt,lastEvaluationAt:this.lastEvaluationAt,
     lastEvaluationSource:this.lastSource,wsSubscriptions:r.subscriptions,
     raydiumReadyPools:r.readyPools,raydiumTrackedPools:r.poolCount,
