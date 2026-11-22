@@ -26,8 +26,8 @@ const dlmm=()=>{
 };
 const damm=()=>{
  const data=Buffer.alloc(1120);Buffer.from([241,154,109,4,17,177,109,188]).copy(data,0);
- new PublicKey(token).toBuffer().copy(data,176);
- new PublicKey(sol).toBuffer().copy(data,208);
+ new PublicKey(token).toBuffer().copy(data,168);
+ new PublicKey(sol).toBuffer().copy(data,200);
  return wrap(METEORA_DAMM_V2,data);
 };
 const pump=()=>{
@@ -67,7 +67,7 @@ test('C3D.2 reads Meteora and PumpSwap mint identities from official layouts',()
  assert.equal(decodeRegistryPoolMints(pk(200),p.info),null,'Pump PDA mismatch');
  const corrupted=Buffer.from(dlmm().data);corrupted[0]=0;
  assert.equal(decodeRegistryPoolMints(pk(100),wrap(METEORA_DLMM,corrupted)),null);
- const altered=Buffer.from(damm().data);new PublicKey(pk(25)).toBuffer().copy(altered,176);
+ const altered=Buffer.from(damm().data);new PublicKey(pk(25)).toBuffer().copy(altered,168);
  assert.equal(decodeRegistryPoolMints(pk(101),wrap(METEORA_DAMM_V2,altered))?.mintA,pk(25));
 });
 test('C3D.2 verifies ownership/mints, matches separate venues, and never quotes new DEX math',async()=>{
