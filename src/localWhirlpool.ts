@@ -12,7 +12,7 @@ import {ORCA_WHIRLPOOL} from './routes.js';
 import type {MarketDataFeed,MarketObservation} from './marketData.js';
 
 const TOKEN_PROGRAM='TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-type Direction='USDC_TO_SOL'|'SOL_TO_USDC';
+type Direction='USDC_TO_SOL'|'SOL_TO_USDC'|'A_TO_B'|'B_TO_A';
 type TokenCtx=TokenExtensionContextForPool;
 type Layout={pool:string;directions:Record<Direction,Array<{address:string;startTickIndex:number}>>;
  release:(()=>void)[];tokenCtx:TokenCtx;};
@@ -122,10 +122,14 @@ export class LocalWhirlpoolQuoter{
   private readonly fetcher:WhirlpoolAccountFetcherInterface,
   private readonly maxAgeMs:number,
   private readonly maxSlotSkew:number,
-  private readonly onPoolChange:(pool:string)=>void
+  private readonly onPoolChange:(pool:string)=>void,
+  private readonly permittedMints?:ReadonlySet<string>,
+  private readonly dependencyPrefix=''
  ){
   this.unsub=feed.onUpdate(update=>{
-   for(const pool of update.affectedPools){
+   for(const dependency of update.affectedPools){
+    if(this.dependencyPrefix&&!dependency.startsWith(this.dependencyPrefix))continue;
+    const pool=this.dependencyPrefix?dependency.slice(this.dependencyPrefix.length):dependency;
     if(!this.layouts.has(pool))continue;
     try{this.onPoolChange(pool);}catch(error){this.error('Local pool callback: '+String(error));}
    }
@@ -165,15 +169,19 @@ export class LocalWhirlpoolQuoter{
   if(!decoded)throw new Error('Whirlpool pool account not yet available in C1 cache');
   const data=decoded.data;
   const a=data.tokenMintA.toBase58(),b=data.tokenMintB.toBase58();
-  if(!((a===SOL_MINT&&b===USDC_MINT)||(a===USDC_MINT&&b===SOL_MINT)))
-   throw new Error('Wrong Whirlpool mint pair');
+  if(this.permittedMints
+    ? (!this.permittedMints.has(a)||!this.permittedMints.has(b)||a===b)
+    : !((a===SOL_MINT&&b===USDC_MINT)||(a===USDC_MINT&&b===SOL_MINT)))
+   throw new Error('Unsupported Whirlpool mint pair');
   if(PoolUtil.isInitializedWithAdaptiveFee(data)){
    this.unsupportedPools++;
    throw new Error('Adaptive-fee Whirlpool requires cached oracle state');
   }
   const dirs:Layout['directions']={
    USDC_TO_SOL:this.tickKeys(pool,data,a===USDC_MINT),
-   SOL_TO_USDC:this.tickKeys(pool,data,a===SOL_MINT)
+   SOL_TO_USDC:this.tickKeys(pool,data,a===SOL_MINT),
+   A_TO_B:this.tickKeys(pool,data,true),
+   B_TO_A:this.tickKeys(pool,data,false)
   };
   const old=this.layouts.get(pool);
   if(old){
@@ -187,12 +195,12 @@ export class LocalWhirlpoolQuoter{
    this.unsupportedPools++;
    throw new Error('Token-2022 Whirlpool mint unsupported in C2 local mode');
   }
-  const tickKeys=[...new Set([...dirs.USDC_TO_SOL,...dirs.SOL_TO_USDC].map(x=>x.address))];
+  const tickKeys=[...new Set(Object.values(dirs).flatMap(d=>d.map(x=>x.address)))];
   const releases:(()=>void)[]=[];
   try{
    // Watching before the batch read avoids dropping intervening updates.
    for(const key of tickKeys)releases.push(this.feed.watch(key));
-   this.feed.setDependencies(pool,[pool,...tickKeys]);
+   this.feed.setDependencies(this.dependencyPrefix+pool,[pool,...tickKeys]);
    this.bootstrapReads++;
    await this.feed.reconcile([pool,...tickKeys],'rpc_bootstrap');
    if(old)for(const release of old.release)release();
@@ -200,9 +208,9 @@ export class LocalWhirlpoolQuoter{
   }catch(error){
    releases.forEach(release=>release());
    if(old){
-    const oldKeys=[...new Set([...old.directions.USDC_TO_SOL,...old.directions.SOL_TO_USDC].map(x=>x.address))];
-    this.feed.setDependencies(pool,[pool,...oldKeys]);
-   }else this.feed.setDependencies(pool,[pool]);
+    const oldKeys=[...new Set(Object.values(old.directions).flatMap(d=>d.map(x=>x.address)))];
+    this.feed.setDependencies(this.dependencyPrefix+pool,[pool,...oldKeys]);
+   }else this.feed.setDependencies(this.dependencyPrefix+pool,[pool]);
    throw error;
   }
  }
@@ -220,9 +228,9 @@ export class LocalWhirlpoolQuoter{
   if(inputRaw<=0n)return null;
   const layout=this.layouts.get(pool),decoded=this.decodePool(pool);
   if(!layout||!decoded)return null;
-  const aToB=direction==='USDC_TO_SOL'
-   ?decoded.data.tokenMintA.toBase58()===USDC_MINT
-   :decoded.data.tokenMintA.toBase58()===SOL_MINT;
+  const aToB=direction==='A_TO_B'||(direction!=='B_TO_A'&&
+   (direction==='USDC_TO_SOL'?decoded.data.tokenMintA.toBase58()===USDC_MINT:
+    decoded.data.tokenMintA.toBase58()===SOL_MINT));
   if(PoolUtil.isInitializedWithAdaptiveFee(decoded.data))return null;
   const required=this.tickKeys(pool,decoded.data,aToB);
   const known=layout.directions[direction];
@@ -305,8 +313,9 @@ export class LocalWhirlpoolQuoter{
   const decoded=this.decodePool(pool);
   if(!decoded)return false;
   const required=this.tickKeys(pool,decoded.data,
-   direction==='USDC_TO_SOL'?decoded.data.tokenMintA.toBase58()===USDC_MINT:
-    decoded.data.tokenMintA.toBase58()===SOL_MINT);
+   direction==='A_TO_B'||(direction!=='B_TO_A'&&
+    (direction==='USDC_TO_SOL'?decoded.data.tokenMintA.toBase58()===USDC_MINT:
+     decoded.data.tokenMintA.toBase58()===SOL_MINT)));
   const fingerprint=[decoded.observation.hash,...required.map(({address})=>{
    const state=this.feed.get(address),absent=this.feed.getVerifiedAbsent(address);
    return state?state.hash:absent?'verified_uninitialized':'unknown';
@@ -319,9 +328,10 @@ export class LocalWhirlpoolQuoter{
   if(PoolUtil.isInitializedWithAdaptiveFee(decoded.data))return false;
   const aToB=decoded.data.tokenMintA.toBase58()===USDC_MINT;
   const required=this.tickKeys(pool,decoded.data,aToB);
-  if(JSON.stringify(required)!==JSON.stringify(layout.directions.USDC_TO_SOL))return false;
+  if(!this.permittedMints&&JSON.stringify(required)!==JSON.stringify(layout.directions.USDC_TO_SOL))return false;
   const pieces:Array<{slot:number;receivedAt:number}>=[decoded.observation];
-  for(const {address} of required){
+  for(const {address} of (this.permittedMints
+   ?[...layout.directions.A_TO_B,...layout.directions.B_TO_A]:required)){
    const item=this.feed.get(address)??this.feed.getVerifiedAbsent(address);
    if(!item)return false;
    pieces.push(item);
@@ -352,7 +362,28 @@ export class LocalWhirlpoolQuoter{
   this.layouts.delete(pool);
   this.lastErrorReason.delete(pool);
   this.failureGate.clearPool(pool);
-  this.feed.setDependencies(pool,[pool]);
+  if(this.dependencyPrefix)this.feed.clearDependencies(this.dependencyPrefix+pool);
+  else this.feed.setDependencies(pool,[pool]);
+ }
+ /** Generic whitelisted-mint exact input with local Orca SDK. */
+ quoteByInputMint(pool:string,inputMint:string,raw:bigint,now=Date.now()):LocalQuote|null{
+  const data=this.decodePool(pool)?.data;
+  if(!data)return null;
+  const a=data.tokenMintA.toBase58(),b=data.tokenMintB.toBase58();
+  if(inputMint!==a&&inputMint!==b)return null;
+  return this.quoteExact(pool,inputMint===a?'A_TO_B':'B_TO_A',raw,now);
+ }
+ graphSnapshot(pool:string,now=Date.now()){
+  const parsed=this.decodePool(pool),layout=this.layouts.get(pool);
+  if(!parsed||!layout||!this.hasReadySnapshot(pool,now))return null;
+  const keys=[...new Set([...layout.directions.A_TO_B,...layout.directions.B_TO_A].map(x=>x.address))];
+  const observations=[parsed.observation,...keys.map(k=>this.feed.get(k)??this.feed.getVerifiedAbsent(k))];
+  if(observations.some(x=>!x))return null;
+  const v=validateLocalComponents(observations as Array<{slot:number;receivedAt:number}>,
+   now,this.maxAgeMs,this.maxSlotSkew);
+  if(!v.ok)return null;
+  return {mintA:parsed.data.tokenMintA.toBase58(),mintB:parsed.data.tokenMintB.toBase58(),
+   observedAt:new Date(v.oldestAt).toISOString(),poolSlot:parsed.observation.slot,tickSlot:v.minSlot};
  }
  stop(){
   this.unsub?.();this.unsub=undefined;
