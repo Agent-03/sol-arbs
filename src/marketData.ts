@@ -74,6 +74,12 @@ export class MarketDataFeed{
    if(!pools?.size)this.reverseDeps.delete(address);
   }
   this.poolDeps.delete(pool);
+  for(const address of previous)this.evictIfUnused(address);
+ }
+ private evictIfUnused(address:string){
+  if(this.subscriptions.has(address)||this.reverseDeps.has(address))return;
+  this.accounts.delete(address);
+  this.expectedOwners.delete(address);
  }
  get(address:string):MarketObservation|undefined{
   const value=this.accounts.get(address);
@@ -142,6 +148,7 @@ export class MarketDataFeed{
   sub.count--;
   if(sub.count>0)return;
   this.subscriptions.delete(address);
+  this.evictIfUnused(address);
   void this.connection.removeAccountChangeListener(sub.id).catch(error=>{
    this.addError('Unsubscribe failed for '+address+': '+String(error));
   });
