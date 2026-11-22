@@ -57,28 +57,27 @@ export function classifyPoolEligibility(
    if(!p||p.status==='missing')return record('waiting',p?.reason??'Waiting for Raydium SDK tick-array snapshot');
    const ageMs=p.ageMs;
    const meta={lastObservedAt:p.lastObservedAt,poolAgeMs:ageMs,tickAgeMs:ageMs,
+    tickSlotVerified:p.tickArraySlotVerified??false,
     quoteLegs:clmm.quotes.filter(q=>q.pool===pool.address).length};
    if(p.status==='refreshing')return record('refreshing','Refreshing Raydium CLMM tick-array SDK snapshot',false,meta);
    if(p.status==='expired'||(ageMs!==undefined&&ageMs>maxQuoteAgeMs))
-    return record('expired','CLMM snapshot outside freshness window; tick arrays not same-slot',false,meta);
+    return record('expired',p.reason??'CLMM local dependencies are old, missing or slot-inconsistent',false,meta);
    if(!meta.quoteLegs)return record('waiting','CLMM tick arrays fetched but SDK could not produce a valid swap quote',false,meta);
-   return record('active','SDK CLMM quote available; tick-array slots not synchronized',true,meta);
+   return record('active',meta.tickSlotVerified?'CLMM pool, tick arrays, fee config and bitmap within bounded slot skew; still indicative':'SDK CLMM quote from independent RPC snapshots; tick slots unverified',true,meta);
   }
   if(program==='orca_whirlpool'){
    const legs=orca.quotedLegs.filter(q=>q.pool===pool.address);
    const poolFresh=orca.poolFreshness?.find(p=>p.pool===pool.address);
    const latest=legs.slice().sort((a,b)=>Date.parse(b.observedAt)-Date.parse(a.observedAt))[0];
    const ageMs=latest?Math.max(0,now-Date.parse(latest.observedAt)):undefined;
-   const latestTick=legs.reduce((time,q)=>{
-    const at=Date.parse(q.tickArraysObservedAt??'');
-    return Number.isFinite(at)?Math.max(time,at):time;
-   },0);
+   const latestTick=Date.parse(latest?.tickArraysObservedAt??'');
    const meta:Partial<PoolEligibility>={quoteLegs:legs.length,lastObservedAt:latest?.observedAt,
-    poolAgeMs:ageMs,tickAgeMs:latestTick?Math.max(0,now-latestTick):undefined};
+    poolAgeMs:ageMs,tickAgeMs:Number.isFinite(latestTick)?Math.max(0,now-latestTick):undefined,
+    tickSlotVerified:latest?.tickArraySlot!=null};
    if(poolFresh?.refreshing)return record('refreshing','Refreshing Orca SDK data; previous quotes retained',false,meta);
    if(!legs.length)return record('waiting','Awaiting first valid Whirlpool/tick-array quote',false,meta);
    if(ageMs!==undefined&&ageMs>maxQuoteAgeMs)return record('expired','Last Whirlpool quote is older than the comparison threshold',false,meta);
-   return record('active','Whirlpool SDK quotes available; tick-array slot not verified',true,meta);
+   return record('active',meta.tickSlotVerified?'Whirlpool SDK local quote from bounded pool/tick slot state':'Whirlpool RPC SDK quote; tick-array slots unverified',true,meta);
   }
   return record('unsupported','No quote adapter');
  });
