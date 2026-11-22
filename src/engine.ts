@@ -265,11 +265,10 @@ export class MarketEngine {
    return {accepted:false,message:'Engine is not idle'};
   const remaining=60000-(Date.now()-this.lastC2ValidationAt);
   if(remaining>0)return {accepted:false,message:'Reference validation cooldown: '+Math.ceil(remaining/1000)+'s'};
-  this.lastC2ValidationAt=Date.now();
-  void this.orca.validateReferenceOnce().then(result=>{
-   this.note(result.accepted?'info':'warning','c2_reference',result.message);
-  }).catch(error=>this.note('warning','c2_reference','SDK cross-check failed: '+String(error)));
-  return {accepted:true,message:'Read-only one-pool SDK comparison requested; see /api/c2 for outcome'};
+  const result=this.orca.requestReferenceValidation();
+  if(result.accepted)this.lastC2ValidationAt=Date.now();
+  this.note(result.accepted?'info':'warning','c2_reference',result.message);
+  return result;
  }
  requestDiscovery():{accepted:boolean;message:string}{
   if(!this.running)return {accepted:false,message:'Engine not started'};
