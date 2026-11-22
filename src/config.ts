@@ -6,6 +6,10 @@ import type {FreshnessRules} from './opportunities.js';
 export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;pools:PublicKey[];maxPools:number;pollIntervalMs:number;staleAfterMs:number;port:number;dataDir:string;ammScanIntervalMs:number;ammMaxSlotSkew:number;orcaScanIntervalMs:number;rpcLimit:RpcLimitOptions;freshness:FreshnessRules;minQuoteLiquidityUsd:number;discoveryRefreshMs:number;noProfitDiscoveryMs:number;b5MaxComponentAgeMs:number;b5ReconcileMs:number;b5OrcaRefreshMs:number;b5OrcaMinTriggerMs:number;b5QuoteSizesUsd:number[];b51ClmmMaxPools:number;b51ClmmRefreshMs:number;b51ClmmMaxCacheAgeMs:number;b52OrcaQuoteMode:'fast'|'full';c2LocalQuotesEnabled:boolean;
  c3HistoryRpcUrl?:string;c3SamplePoolCount:number;c3SignaturesPerPool:number;
  c3MaxTransactions:number;c3ScanCooldownMs:number;c3HistoryMinSpacingMs:number;
+ c3GraphEnabled:boolean;c3GraphMaxPools:number;c3GraphPerPair:number;
+ c3GraphRefreshMs:number;c3GraphReconcileMs:number;
+ c3GraphMaxPathChecks:number;c3GraphMaxResults:number;
+ c3GraphMinLiquidityUsd:number;c3GraphSizesUsd:number[];
  jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
@@ -60,6 +64,19 @@ export function loadConfig():Config{
   c3MaxTransactions:positiveInteger('C3_MAX_TRANSACTIONS_PER_SCAN',12),
   c3ScanCooldownMs:positiveInteger('C3_SCAN_COOLDOWN_MS',300000),
   c3HistoryMinSpacingMs:positiveInteger('C3_HISTORY_RPC_MIN_SPACING_MS',1500),
+  c3GraphEnabled:(()=>{
+   const value=process.env.C3_GRAPH_ENABLED??'1';
+   if(value!=='0'&&value!=='1')throw new Error('C3_GRAPH_ENABLED must be 0 or 1');
+   return value==='1';
+  })(),
+  c3GraphMaxPools:positiveInteger('C3_GRAPH_MAX_POOLS',18),
+  c3GraphPerPair:positiveInteger('C3_GRAPH_PER_PAIR',3),
+  c3GraphRefreshMs:positiveInteger('C3_GRAPH_REFRESH_MS',600000),
+  c3GraphReconcileMs:positiveInteger('C3_GRAPH_RECONCILE_MS',15000),
+  c3GraphMaxPathChecks:positiveInteger('C3_GRAPH_MAX_PATH_CHECKS',10000),
+  c3GraphMaxResults:positiveInteger('C3_GRAPH_MAX_RESULTS',50),
+  c3GraphMinLiquidityUsd:nonNegativeNumber('C3_GRAPH_MIN_LIQUIDITY_USD',50000),
+  c3GraphSizesUsd:sizes('C3_GRAPH_SIZES_USD','500,2500,5000'),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};
