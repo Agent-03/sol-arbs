@@ -84,7 +84,8 @@ export class MarketEngine {
   );
   this.orca=new OrcaMonitor(conn,this.pools,config.b5QuoteSizesUsd,
    ()=>this.ray.snapshot().quotes,config.jupiter.assumedCostUsd,
-   config.b5OrcaRefreshMs,config.minQuoteLiquidityUsd);
+   config.b5OrcaRefreshMs,config.minQuoteLiquidityUsd,
+   ()=>this.evaluate('orca_refresh',Date.now(),false));
   this.note('info','startup','B5 read-only engine initialized. Raydium vaults: WebSocket state; Orca: SDK refreshes.');
  }
  private note(level:Activity['level'],kind:string,message:string){
