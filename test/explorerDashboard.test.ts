@@ -102,6 +102,7 @@ test('C3D.4.3 shows prioritized RPC lanes and local recovery telemetry',()=>{
   'dl.windowShiftReindexes','dl.queueDeadlineExceeded',
   'dl.transportDeadlineExceeded','dl.periodicReindexesRemoved',
   'v.pendingByPriority','v.queueWaitMsP95','v.transportMsP95',
+  'v.pacingMsP95',
   'v.backgroundMaxConcurrent'
  ])assert.ok(explorerHtml.includes(term),'missing '+term);
 });
