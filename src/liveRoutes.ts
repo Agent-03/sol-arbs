@@ -23,6 +23,7 @@ export function combineLiveQuotes(
  const rays=raydium.filter(r=>r.direction==='USDC_TO_SOL');
  const buys=orca.filter(o=>o.direction==='USDC_TO_SOL');
  const sells=orca.filter(o=>o.direction==='SOL_TO_USDC');
+ const orcaPoolCount=new Set(orca.map(q=>q.pool)).size;
  const emit=(candidate:ArbitrageCandidate,model:'amm_v4'|'clmm')=>{
   candidates.push({...candidate,raydiumModel:model,
    buyLiquidityUsd:poolLiquidity.get(candidate.buyPool),
@@ -46,7 +47,7 @@ export function combineLiveQuotes(
    }catch{failed++;}
   }
   const matching=sells.filter(s=>s.inputRaw===ray.outputRaw&&s.pool!==ray.pool);
-  unmatchedReverseLegs+=sells.filter(s=>s.pool!==ray.pool&&s.inputRaw!==ray.outputRaw).length;
+  unmatchedReverseLegs+=Math.max(0,orcaPoolCount-matching.length);
   for(const sell of matching){
    evaluated++;
    try{
@@ -81,7 +82,7 @@ export function combineLiveQuotes(
  for(const clmm of clmmBuys){
   const size=Number(BigInt(clmm.inputRaw))/1e6;
   const matches=sells.filter(s=>s.inputRaw===clmm.outputRaw&&s.pool!==clmm.pool);
-  unmatchedReverseLegs+=sells.filter(s=>s.pool!==clmm.pool&&s.inputRaw!==clmm.outputRaw).length;
+  unmatchedReverseLegs+=Math.max(0,orcaPoolCount-matches.length);
   for(const sell of matches){
    evaluated++;clmmEvaluated++;
    try{
