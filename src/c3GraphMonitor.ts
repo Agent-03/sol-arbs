@@ -28,7 +28,7 @@ const baseline=(options:GraphMonitorOptions):GraphEvaluation=>
   minLiquidityUsd:options.minLiquidityUsd,maxPathChecks:options.maxPathChecks,
   maxResults:options.maxResults,assumedCostUsd:options.assumedCostUsd});
 
-function candidateRows(result:unknown,a:GraphAsset,b:GraphAsset):Candidate[]{
+export function parseRaydiumGraphPair(result:unknown,a:GraphAsset,b:GraphAsset):Candidate[]{
  if(!result||typeof result!=='object')return [];
  const v=result as {success?:boolean;data?:{data?:unknown}};
  if(v.success!==true||!Array.isArray(v.data?.data))return [];
@@ -60,7 +60,7 @@ async function fetchPair(a:GraphAsset,b:GraphAsset,timeoutMs=8000):Promise<Candi
  try{
   const r=await fetch(u,{headers:{accept:'application/json'},signal:controller.signal});
   if(!r.ok)throw new Error('Raydium API HTTP '+r.status);
-  return candidateRows(await r.json(),a,b);
+  return parseRaydiumGraphPair(await r.json(),a,b);
  }finally{clearTimeout(timer)}
 }
 export class C3GraphMonitor{
@@ -189,6 +189,7 @@ export class C3GraphMonitor{
    for(let i=0;i<assets.length;i++)for(let j=i+1;j<assets.length;j++)
     pairs.push([assets[i],assets[j]]);
    const results=await Promise.allSettled(pairs.map(([a,b])=>fetchPair(a,b)));
+   if(!this.running)return;
    const buckets:Candidate[][]=[];
    results.forEach((result,i)=>{
     if(result.status==='fulfilled'){
@@ -216,6 +217,7 @@ export class C3GraphMonitor{
     const block=picked.slice(start,start+75);
     const response=await this.rpc.getMultipleAccountsInfoAndContext(
      block.map(p=>new PublicKey(p.address)),'confirmed');
+    if(!this.running)return;
     response.value.forEach((info,i)=>{
      if(!info||info.owner.toBase58()!==RAYDIUM_AMM_V4)return;
      const candidate=block[i];
@@ -249,6 +251,7 @@ export class C3GraphMonitor{
     const batch=addresses.slice(start,start+75);
     const response=await this.rpc.getMultipleAccountsInfoAndContext(
      batch.map(x=>new PublicKey(x)),'confirmed');
+    if(!this.running)return;
     const at=Date.now();
     response.value.forEach((info,i)=>{
      if(!info)return;
