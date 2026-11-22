@@ -1,5 +1,5 @@
 import {Connection,PublicKey,type EpochInfo} from '@solana/web3.js';
-import {Raydium,PoolUtils,PoolInfoLayout,TickArrayLayout,TickUtil} from '@raydium-io/raydium-sdk-v2';
+import {Raydium,PoolUtils,PoolInfoLayout,TickArrayLayout,TickArrayBitmapExtensionLayout,ClmmConfigLayout,TickUtil} from '@raydium-io/raydium-sdk-v2';
 import BN from 'bn.js';
 import {SOL_MINT,USDC_MINT,type DiscoveredPool} from './discovery.js';
 import {RAYDIUM_CLMM} from './routes.js';
@@ -11,7 +11,7 @@ type Cached={
  observedAt:string;finishedAt:string;slot:number;
  data:ClmmSdkData;epochInfo:EpochInfo;
  tickArrayCount:number;
- tickKeys:string[];release:(()=>void)[];
+ tickKeys:string[];extraKeys:[string,string];release:(()=>void)[];
  tickArraySlot:number|null;verifiedCache:boolean;
 };
 export type ClmmQuote={
@@ -116,16 +116,30 @@ export class ClmmMonitor {
   if(!entry||!this.feed)return false;
   const poolState=this.feed.get(pool);
   const tickStates=entry.tickKeys.map(key=>this.feed!.get(key));
-  if(!poolState||tickStates.some(t=>!t)){
+  const configState=this.feed.get(entry.extraKeys[0]);
+  const extension=this.feed.get(entry.extraKeys[1]);
+  const verifiedNoExtension=this.feed.getVerifiedAbsent(entry.extraKeys[1]);
+  if(!poolState||tickStates.some(t=>!t)||!configState||!extension&&!verifiedNoExtension){
    entry.verifiedCache=false;
    return false;
   }
-  const observations=[poolState,...tickStates.filter((t):t is NonNullable<typeof t>=>Boolean(t))];
+  const observations=[poolState,configState,
+   ...tickStates.filter((t):t is NonNullable<typeof t>=>Boolean(t)),
+   ...(extension?[extension]:[verifiedNoExtension!])];
   const valid=validateLocalComponents(observations,Date.now(),this.maxCacheAgeMs,this.maxSlotSkew);
   if(!valid.ok){entry.verifiedCache=false;return false;}
   try{
    if(poolState.owner!==RAYDIUM_CLMM)throw new Error('CLMM owner changed');
    const decoded=PoolInfoLayout.decode(poolState.data);
+   if(configState.owner!==RAYDIUM_CLMM||extension&&extension.owner!==RAYDIUM_CLMM)
+    throw new Error('CLMM config/bitmap owner mismatch');
+   const config=ClmmConfigLayout.decode(configState.data);
+   if(!decoded.configId.equals(new PublicKey(entry.extraKeys[0]))||config.tickSpacing!==decoded.tickSpacing)
+    throw new Error('CLMM config relation or tick spacing changed');
+   const exBitmapInfo=extension?TickArrayBitmapExtensionLayout.decode(extension.data):
+    entry.data.computePoolInfo.exBitmapInfo;
+   if(extension&&!exBitmapInfo.poolId.equals(new PublicKey(pool)))
+    throw new Error('CLMM bitmap points to wrong pool');
    if(!decoded.mintA.equals(new PublicKey(entry.data.poolInfo.mintA.address))||
       !decoded.mintB.equals(new PublicKey(entry.data.poolInfo.mintB.address)))
     throw new Error('CLMM mint pair changed');
@@ -144,7 +158,12 @@ export class ClmmMonitor {
     accInfo:decoded,liquidity:decoded.liquidity,sqrtPriceX64:decoded.sqrtPriceX64,
     currentPrice:TickUtil.sqrtPriceX64ToPrice(decoded.sqrtPriceX64,
      entry.data.poolInfo.mintA.decimals,entry.data.poolInfo.mintB.decimals),
-    tickCurrent:decoded.tickCurrent,tickArrayBitmap:decoded.tickArrayBitmap
+    tickCurrent:decoded.tickCurrent,tickArrayBitmap:decoded.tickArrayBitmap,
+    ammConfig:{...entry.data.computePoolInfo.ammConfig,
+     index:config.index,tradeFeeRate:config.tradeFeeRate,
+     protocolFeeRate:config.protocolFeeRate,fundFeeRate:config.fundFeeRate,
+     tickSpacing:config.tickSpacing},
+    exBitmapInfo
    };
    entry.data.tickData[pool]=ticks;
    entry.slot=valid.minSlot;
@@ -164,15 +183,20 @@ export class ClmmMonitor {
   if(!this.feed)return;
   const keys=[...new Set(entry.data.tickArrays.map(x=>x.address.toBase58()))];
   if(!keys.length)throw new Error('SDK did not expose CLMM tick-array addresses');
+  const extraKeys:[string,string]=[
+   entry.data.rpcPoolInfo.configId.toBase58(),
+   entry.data.computePoolInfo.exBitmapAccount.toBase58()
+  ];
+  const allKeys=[...new Set([...keys,...extraKeys])];
   const releases:(()=>void)[]=[];
   try{
-   for(const address of keys){
+   for(const address of allKeys){
     this.feed.expectOwner(address,RAYDIUM_CLMM);
     releases.push(this.feed.watch(address));
    }
-   this.feed.setDependencies(pool,[pool,...keys]);
-   await this.feed.reconcile([pool,...keys],'rpc_bootstrap');
-   entry.tickKeys=keys;
+   this.feed.setDependencies(pool,[pool,...allKeys]);
+   await this.feed.reconcile([pool,...allKeys],'rpc_bootstrap');
+   entry.tickKeys=keys;entry.extraKeys=extraKeys;
    entry.release=releases;
    this.cache.set(pool,entry);
    this.applyFeedState(pool);
@@ -252,7 +276,7 @@ export class ClmmMonitor {
      if(!ticks||!Object.keys(ticks).length)throw new Error('missing or uninitialized tick arrays');
      const entry:Cached={observedAt:started,finishedAt:new Date().toISOString(),
       slot:checked.context.slot,data,epochInfo,tickArrayCount:Object.keys(ticks).length,
-      tickKeys:[],release:[],tickArraySlot:null,verifiedCache:!this.feed};
+      tickKeys:[],extraKeys:['',''],release:[],tickArraySlot:null,verifiedCache:!this.feed};
      const previous=this.cache.get(pool.address);
      if(this.feed){
       // New watches are installed before prior ones are released.
