@@ -158,10 +158,15 @@ export class MarketEngine {
   const p=this.pools.find(p=>p.address===event.address);
   if(p?.owner!==ORCA_WHIRLPOOL)return;
   this.orcaTriggers++;
-  if(this.busy!=='idle'||Date.now()-this.lastOrcaStartedAt<this.config.b5OrcaMinTriggerMs){
+  const latestCycle=this.lastOrcaFinishedAt?Date.parse(this.lastOrcaFinishedAt):this.lastOrcaStartedAt;
+  if(this.busy!=='idle'||Date.now()-latestCycle<this.config.b5OrcaMinTriggerMs){
    this.suppressedTriggers++;return;
   }
-  // Debounce account events and keep the per-provider RPC limiter intact.
+  // Once a refresh has been queued, do NOT repeatedly reset its debounce
+  // timer under a stream of pool changes. Preserve the shared RPC limiter.
+  if(this.nextScanAt && Date.parse(this.nextScanAt)<=Date.now()+1000){
+   this.suppressedTriggers++;return;
+  }
   this.schedule(300);
  }
  async start(){
