@@ -110,7 +110,7 @@ export class MarketDataFeed{
   const existing=this.accounts.get(address);
   if(existing){
    if(slot<existing.slot){this.olderSlotDrops++;return false;}
-   if(slot===existing.slot&&hash===existing.hash&&owner===existing.owner){
+   if(slot>=existing.slot&&hash===existing.hash&&owner===existing.owner){
     // A repeated RPC read may validate an old observation; it does not
     // turn that observation into a newer market update.
     existing.verifiedAt=receivedAt;
