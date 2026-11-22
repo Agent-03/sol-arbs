@@ -10,7 +10,8 @@ test('live dashboard inline JavaScript parses successfully',()=>{
 });
 test('dashboard exposes core monitoring controls and real backend routes',()=>{
  for(const item of ['id="scan-btn"','id="discover-btn"','/api/dashboard','/api/actions/',
-  'Excluded','Live detection engine','RPC network','Local evaluation history']){
+  'Excluded','Live detection engine','RPC network','Local evaluation history',
+  'Usable market coverage','Pool eligibility','orca-continuity','coverage-complete','clmm-state']){
   assert.ok(dashboardHtml.includes(item),'missing '+item);
  }
 });
