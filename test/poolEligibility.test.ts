@@ -67,3 +67,12 @@ test('expired quote has not become fresh just because monitoring is active',()=>
  const list=classifyPoolEligibility(pools,ray,stale,clmm,10000,1,15000,now);
  assert.equal(list.find(p=>p.address==='orca-high')?.state,'expired');
 });
+
+test('fast diagnostic mode does not pretend to monitor the reverse direction',()=>{
+ const list=classifyPoolEligibility(pools,ray,orca,clmm,10000,1,15000,now);
+ const fast=computeCoverage(list,3,3,1,0,1,1);
+ const full=computeCoverage(list,3,3,1,0,1,2);
+ assert.equal(fast.theoreticalComparisons,6);
+ assert.equal(full.theoreticalComparisons,12);
+ assert.ok(fast.comparisonCoveragePct>full.comparisonCoveragePct);
+});
