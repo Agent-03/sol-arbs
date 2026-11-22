@@ -14,7 +14,8 @@ test('explorer retains the screenshot-inspired live table interactions',()=>{
   'Transactions','data-tab="routes"','data-tab="transactions"',
   'id="query"','id="filter"','id="size"','id="csv"',
   'id="pagination"','data-sort','/api/explorer','/terminal',
-  'id="c1watched"','id="c1updates"','id="c1ready"','/api/market-data','id="c2orca"','id="c2clmm"','id="c2checks"','id="validate"','/api/actions/validate'
+  'id="c1watched"','id="c1updates"','id="c1ready"','/api/market-data','id="c2orca"','id="c2clmm"','id="c2checks"','id="validate"','/api/actions/validate',
+  'On-chain Evidence','data-tab="chain"','id="samplechain"','/api/actions/c3-analyze','/api/c3'
  ];
  for(const term of expected)assert.ok(explorerHtml.includes(term),'missing '+term);
 });
