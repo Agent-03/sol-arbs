@@ -75,17 +75,24 @@ export class RpcHttpLimiter {
  readonly fetch:typeof globalThis.fetch=async (input,init)=>{
   this.calls++;
   for(let attempt=0;attempt<=this.options.maxRetries;attempt++){
+   // Capture 429 and establish the shared cooldown *before* allowing
+   // the next queued RPC call to start.
    const response=await this.exclusive(async()=>{
     this.attempts++;
-    try{return await this.transport(input,init);}
+    let received:Response;
+    try{received=await this.transport(input,init);}
     catch(error){this.transportErrors++;throw error;}
+    if(received.status===429){
+     this.rateLimits++;
+     this.last429At=new Date().toISOString();
+     const retryAfter=parseRetryAfterMs(received.headers.get('retry-after'));
+     const exponential=Math.min(this.options.maxBackoffMs,this.options.initialBackoffMs*(2**attempt));
+     const delay=Math.max(exponential,retryAfter??0);
+     this.cooldownUntil=Math.max(this.cooldownUntil,Date.now()+delay);
+    }
+    return received;
    });
    if(response.status!==429)return response;
-   this.rateLimits++;
-   this.last429At=new Date().toISOString();
-   const retryAfter=parseRetryAfterMs(response.headers.get('retry-after'));
-   const delay=Math.min(this.options.maxBackoffMs,Math.max(this.options.initialBackoffMs*(2**attempt),retryAfter??0));
-   this.cooldownUntil=Math.max(this.cooldownUntil,Date.now()+delay);
    if(attempt===this.options.maxRetries)return response;
    this.retryAttempts++;
    // We own 429 retries; the caller must set disableRetryOnRateLimit=true.
