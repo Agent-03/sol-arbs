@@ -200,6 +200,13 @@ export class MarketEngine {
    return;
   }
   if(p?.owner!==ORCA_WHIRLPOOL)return;
+  if(this.orca.hasLocalPricing(p.address)){
+   // The shared feed has already notified the local Whirlpool calculator;
+   // scheduling another SDK round-trip would turn a fast event into a
+   // ~30-second request queue. Periodic fallback scans still reconcile.
+   this.orcaTriggers++;
+   return;
+  }
   this.orcaTriggers++;
   this.pendingOrcaPools.add(p.address);
   const latestCycle=this.lastOrcaFinishedAt?Date.parse(this.lastOrcaFinishedAt):this.lastOrcaStartedAt;
