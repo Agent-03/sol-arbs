@@ -32,7 +32,7 @@ export const assetOfMint=(mint:string):GraphAsset|undefined=>MINT_TO_ASSET.get(m
 export const displayGraphAsset=(name:GraphAsset)=>GRAPH_ASSETS[name]?.symbol??name;
 
 export type GraphPool={
- address:string;program:'raydium_amm_v4'|'raydium_cpmm'|'orca_whirlpool'|'raydium_clmm';tokenA:GraphAsset;tokenB:GraphAsset;
+ address:string;program:'raydium_amm_v4'|'raydium_cpmm'|'orca_whirlpool'|'raydium_clmm'|'meteora_dlmm';tokenA:GraphAsset;tokenB:GraphAsset;
  reserveA:string;reserveB:string;feeNumerator:string;feeDenominator:string;
  creatorFeeRate?:string;creatorFeeOn?:0|1|2;
  quoteExactInput?:(from:GraphAsset,raw:bigint)=>bigint|null;
@@ -74,14 +74,16 @@ export type GraphEvaluation={
 };
 const LIMITATIONS=[
  'C3D.1 dynamic SPL token pool discovery; wSOL-rooted exact-input graph across Raydium and Orca.',
- 'New tokens require on-chain mint/program verification; Meteora and PumpSwap pricing are next-stage adapters.',
- 'CLMM quotes require complete fresh tick arrays; no mid-price approximation or unverified execution.',
+ 'Meteora DLMM uses local SDK bin-array quotes; DAMM v2 and PumpSwap quote adapters remain unsupported.',
+ 'Concentrated quotes require fresh, complete tick or bin arrays; no mid-price approximation.',
  'Independent WebSocket account observations are not same-slot atomic snapshots.',
  'Fees, Jito tips and execution landing are estimates or unknown; a positive route is not executable profit.',
  'Historical replay, transaction simulation and actual swap execution are NOT enabled.'
 ];
 type Edge={pool:GraphPool;from:GraphAsset;to:GraphAsset;reserveIn:bigint;reserveOut:bigint;feeNum:bigint;feeDen:bigint};
 const validInt=(n:number)=>Number.isSafeInteger(n)&&n>=0;
+const usesSdkQuote=(p:GraphPool)=>
+ p.program==='orca_whirlpool'||p.program==='raydium_clmm'||p.program==='meteora_dlmm';
 
 /** Pure synchronous graph enumeration. No RPC, WebSockets or async price calls.
  * Each path applies the next pool's exact-input integer CPMM quote to the
@@ -119,7 +121,7 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
   try{
    const ra=BigInt(pool.reserveA),rb=BigInt(pool.reserveB);
    const fn=BigInt(pool.feeNumerator),fd=BigInt(pool.feeDenominator);
-   const concentrated=pool.program==='orca_whirlpool'||pool.program==='raydium_clmm';
+   const concentrated=usesSdkQuote(pool);
    if((!concentrated&&(ra<=0n||rb<=0n))||fn<0n||fd<=0n||fn>=fd||
       (concentrated&&typeof pool.quoteExactInput!=='function'))throw new Error('invalid model');
    const a:Edge={pool,from:pool.tokenA,to:pool.tokenB,reserveIn:ra,reserveOut:rb,feeNum:fn,feeDen:fd};
@@ -149,7 +151,7 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
    pathChecks++;
    const n=depth+1;
    if(limits.maxPoolInputShareBps!==undefined&&
-      ((edge.pool.program==='orca_whirlpool'||edge.pool.program==='raydium_clmm')
+      (usesSdkQuote(edge.pool)
        ?(base==='USDC'&&
          (edge.pool.liquidityUsd===null||size*10000>edge.pool.liquidityUsd*limits.maxPoolInputShareBps))
        :raw*10000n>edge.reserveIn*BigInt(limits.maxPoolInputShareBps))){
@@ -158,7 +160,7 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
    if(n===2)twoLegChecks++;
    if(n===3)threeLegChecks++;
    let output:bigint;
-   try{output=edge.pool.program==='orca_whirlpool'||edge.pool.program==='raydium_clmm'
+   try{output=usesSdkQuote(edge.pool)
      ?(edge.pool.quoteExactInput?.(edge.from,raw)??0n)
      :edge.pool.program==='raydium_cpmm'
      ?cpmmAmountOut(raw,edge.reserveIn,edge.reserveOut,
