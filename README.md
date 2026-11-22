@@ -620,3 +620,56 @@ Watch `progress.transactionsAnalyzed`, `summary.counts`, and `summary.topDexProg
 C3A is a **first-pass independent evidence collector**, not a validated historical winner ledger. Reconstructing complete per-instruction swap paths (including program-derived inventories), separately detecting and costing Jito tips, historical SOL/USDC fee conversion, and full pool/token-wide indexing require deeper decoding or an indexed data source. Those are the next evidence-quality priorities before using historical winners to choose new live strategies.
 
 The local scanner still monitors the existing C2 SOL/USDC routes. C3A does not add liquidity venues or route directions to the live engine yet. **No signing, orders, wallet actions or transaction broadcasting** have been enabled.
+
+
+## Phase C3B — fast event-driven 2-leg and 3-leg scanner (read-only)
+
+C3B expands live research without generating a separate RPC quote request for every candidate:
+
+**Existing SOL/USDC engine:**
+- Keeps C2's one-size `fast` Orca pricing path (e.g. `B5_QUOTE_SIZES_USD=5000`).
+- When `C2_LOCAL_QUOTES_ENABLED=1`, evaluates BOTH Orca → Raydium and Raydium → Orca by using local Whirlpool exact-input swaps from verified cached tick-array state. `fast` no longer means reverse paths are deliberately omitted.
+- Enumerates two-leg routes across **distinct liquidity pools**, including Raydium↔Raydium, Orca↔Orca, CLMM↔AMM V4 and CLMM↔CLMM where the corresponding exact local quote exists. **No price interpolation** or fabricated reverse amounts. A missing/invalid/stale quote is a miss.
+- Adds `b5.localReverseHits` and `b5.localReverseMisses` diagnostics to `GET /api/dashboard`.
+
+**New multi-token graph:**
+- Discovers a bounded sample of Raydium AMM V4 pools across six pairs of USDC, SOL, USDT and JUP. Validates program ownership, pool account data, allowed mint pair, vault owner and balances. It does not silently label unsupported pools as quoteable.
+- Subscribes to pool and vault accounts via the existing deduplicated C1 WebSocket feed, then refreshes pool snapshots in batched on-chain RPC reads. Subsequent WS changes trigger coalesced **local** route calculations with no HTTP quote call on the hot path.
+- Searches all contiguous, **distinct-pool** USDC-rooted 2-leg and 3-leg cycles. Each leg uses the exact integer output of the previous leg as its next input; AMM V4 swap fees and price impact are applied on each leg. Routes are subject to quote-age, inter-pool timestamp gap, slot skew and reported liquidity screens.
+- By default probes `$500`, `$2,500` and `$5,000`, with `$5,000` retained as the largest probe. A path can be profitable-looking for a smaller input but negative at $5k. All candidate counts and scores are **research estimates only**.
+- Caps pool discovery, per-pair candidates, path checks and displayed results so higher event rates do not cause unlimited CPU or RPC work.
+- Exposes `GET /api/c3/graph`: `trackedPools`, `eligiblePools`, `twoLegCycles`, `threeLegCycles`, `positiveIndicative`, `pathChecks`, `elapsedMs`, `truncated`, route details and `errors`. A new **Multi-hop Radar** tab in the explorer shows the best research cycles.
+
+**Important boundaries:**
+- C3B's multi-token graph currently prices **Raydium AMM V4 only**. Orca/CLMM are still monitored on the existing SOL/USDC engine but are not yet generic multi-token graph adapters. This means the multi-token graph can miss all paths that rely on those venues. Zero 3-leg cycles can mean missing liquidity/program coverage.
+- Local computations are *not* atomic, same-slot, transaction-simulated, or guaranteed execution. `assumedCostUsd` is an estimate, and **Jito tips, priority fees, slippage and landing are not measured**. Positive output never means proven profit.
+- Historical C3A evidence and live C3B graph quotes are distinct research sources. This upgrade does not send or sign transactions, and it does not assert a profitable edge.
+
+### Run on Windows
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Inspect the graph in a second PowerShell session:
+
+```powershell
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+$g | Select-Object status,trackedPools,watchedAccounts,eligiblePools,stalePools,pathChecks,truncated,elapsedMs,twoLegCycles,threeLegCycles,positiveIndicative,bestIndicativeNetUsd | Format-List
+$g.candidates | Select-Object -First 15 legs,tokenPath,poolPath,sizeUsd,indicativeNetUsd,maxSlotGap | Format-List
+$g.errors
+```
+
+Compare fast SOL/USDC cross-pool evaluations:
+
+```powershell
+$d = Invoke-RestMethod http://127.0.0.1:8787/api/dashboard
+$d.b5 | Select-Object quoteMode,activeSizesUsd,routeEvaluations,localReverseHits,localReverseMisses,unmonitoredReverseDirections | Format-List
+$d.opportunities | Select-Object total,comparable,positive,bestComparableNetUsd | Format-List
+```
+
+Tuning: The default graph uses `C3_GRAPH_MAX_POOLS=18` and `C3_GRAPH_RECONCILE_MS=15000`. Start with this budget before increasing pools; the same Helius RPC and WebSocket provider is shared with the existing scanner, and more subscriptions can worsen delivery or rate limits. Use `C3_GRAPH_ENABLED=0` to disable the graph without affecting C2. The full parameter list is in `.env.example`.
