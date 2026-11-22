@@ -1,0 +1,110 @@
+import type {DiscoveredPool} from './discovery.js';
+import {identifyProgram,type VenueProgram} from './routes.js';
+import type {LiveRaydiumSnapshot} from './liveRaydium.js';
+import type {OrcaStatus} from './orca.js';
+import type {ClmmHealth} from './clmm.js';
+
+export type PoolEligibility={
+ address:string;venue:DiscoveredPool['venue'];program:VenueProgram;liquidityUsd?:number;
+ state:'active'|'refreshing'|'expired'|'waiting'|'excluded'|'unsupported'|'not_selected';
+ reason:string;qualifiesForResearch:boolean;
+ lastObservedAt?:string;poolAgeMs?:number;tickAgeMs?:number;
+ tickSlotVerified:boolean;quoteLegs:number;
+};
+export function classifyPoolEligibility(
+ pools:readonly DiscoveredPool[],
+ ray:LiveRaydiumSnapshot,
+ orca:OrcaStatus,
+ clmm:ClmmHealth,
+ minLiquidityUsd:number,
+ maxClmmPools:number,
+ now=Date.now()
+):PoolEligibility[]{
+ const chosen=new Set(clmm.perPool.map(p=>p.pool));
+ const eligibleClmm=pools.filter(p=>p.owner=== 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK'&&
+   (p.venue==='raydium'||p.venue==='manual')&&
+   (p.liquidityUsd===undefined||p.liquidityUsd>=minLiquidityUsd))
+   .sort((a,b)=>(b.liquidityUsd??0)-(a.liquidityUsd??0))
+   .slice(0,maxClmmPools);
+ const chosenClmm=new Set(eligibleClmm.map(p=>p.address));
+ return pools.map(pool=>{
+  const program=identifyProgram(pool.owner);
+  const base={address:pool.address,venue:pool.venue,program,liquidityUsd:pool.liquidityUsd,
+   tickSlotVerified:false,quoteLegs:0};
+  const record=(state:PoolEligibility['state'],reason:string,qualifiesForResearch=false,
+   meta:Partial<PoolEligibility>={}):PoolEligibility=>({...base,state,reason,qualifiesForResearch,...meta});
+  if(program==='unsupported')return record('unsupported','Unsupported on-chain DEX program');
+  if(program==='orca_whirlpool'&&pool.venue==='raydium'||
+     (program==='raydium_amm_v4'||program==='raydium_clmm')&&pool.venue==='orca')
+   return record('unsupported','Discovery venue does not match program owner');
+  if(pool.liquidityUsd===undefined)return record('excluded','Reported pool liquidity unavailable: not comparable');
+  if(pool.liquidityUsd<minLiquidityUsd)return record('excluded','Reported liquidity below $'+minLiquidityUsd.toLocaleString());
+  if(program==='raydium_amm_v4'){
+   const q=ray.quotes.filter(x=>x.pool===pool.address);
+   const reason=ray.poolReasons[pool.address];
+   if(reason)return record('waiting',reason);
+   if(!q.length)return record('waiting','Awaiting verified pool and vault state');
+   const at=q[0].observedAt;
+   const ageMs=Math.max(0,now-Date.parse(at));
+   return record('active','AMM v4 state available; OpenBook orders not reconciled',true,
+    {quoteLegs:q.length,lastObservedAt:at,poolAgeMs:ageMs});
+  }
+  if(program==='raydium_clmm'){
+   if(!chosenClmm.has(pool.address))return record('not_selected','Outside current CLMM RPC quote budget');
+   const p=clmm.perPool.find(q=>q.pool===pool.address);
+   if(!p||p.status==='missing')return record('waiting',p?.reason??'Waiting for Raydium SDK tick-array snapshot');
+   const ageMs=p.ageMs;
+   const meta={lastObservedAt:p.lastObservedAt,poolAgeMs:ageMs,tickAgeMs:ageMs,
+    quoteLegs:clmm.quotes.filter(q=>q.pool===pool.address).length};
+   if(p.status==='refreshing')return record('refreshing','Refreshing Raydium CLMM tick-array SDK snapshot',false,meta);
+   if(p.status==='expired')return record('expired','CLMM quote snapshot expired',false,meta);
+   return record('active','SDK CLMM quote available; tick-array slots not synchronized',true,meta);
+  }
+  if(program==='orca_whirlpool'){
+   const legs=orca.quotedLegs.filter(q=>q.pool===pool.address);
+   const poolFresh=orca.poolFreshness?.find(p=>p.pool===pool.address);
+   const latest=legs.slice().sort((a,b)=>Date.parse(b.observedAt)-Date.parse(a.observedAt))[0];
+   const ageMs=latest?Math.max(0,now-Date.parse(latest.observedAt)):undefined;
+   const latestTick=legs.reduce((time,q)=>{
+    const at=Date.parse(q.tickArraysObservedAt??'');
+    return Number.isFinite(at)?Math.max(time,at):time;
+   },0);
+   const meta:Partial<PoolEligibility>={quoteLegs:legs.length,lastObservedAt:latest?.observedAt,
+    poolAgeMs:ageMs,tickAgeMs:latestTick?Math.max(0,now-latestTick):undefined};
+   if(poolFresh?.refreshing)return record('refreshing','Refreshing Orca SDK data; previous quotes retained',false,meta);
+   if(!legs.length)return record('waiting','Awaiting first valid Whirlpool/tick-array quote',false,meta);
+   if(ageMs!==undefined&&ageMs>15000)return record('expired','Last Whirlpool quote is older than the comparison threshold',false,meta);
+   return record('active','Whirlpool SDK quotes available; tick-array slot not verified',true,meta);
+  }
+  return record('unsupported','No quote adapter');
+ });
+}
+
+export type CoverageSummary={
+ discoveredPools:number;supportedEligiblePools:number;activeQuotePools:number;
+ poolsWaiting:number;poolsRefreshing:number;poolsExpired:number;
+ lowLiquidityOrUnsupported:number;raydiumPairs:number;orcaPools:number;
+ sizes:number;theoreticalComparisons:number;completeEstimates:number;
+ freshnessQualified:number;positiveEstimates:number;negativeEstimates:number;
+ comparisonCoveragePct:number;
+};
+export function computeCoverage(
+ rows:readonly PoolEligibility[],sizes:number,
+ completeEstimates:number,freshnessQualified:number,
+ positiveEstimates:number,negativeEstimates:number
+):CoverageSummary{
+ const supported=rows.filter(r=>r.program!=='unsupported'&&r.state!=='excluded'&&r.state!=='not_selected');
+ const ray=supported.filter(p=>p.program==='raydium_amm_v4'||p.program==='raydium_clmm');
+ const orca=supported.filter(p=>p.program==='orca_whirlpool');
+ const theoretical=ray.length*orca.length*sizes*2;
+ return {discoveredPools:rows.length,supportedEligiblePools:supported.length,
+  activeQuotePools:rows.filter(r=>r.state==='active').length,
+  poolsWaiting:rows.filter(r=>r.state==='waiting').length,
+  poolsRefreshing:rows.filter(r=>r.state==='refreshing').length,
+  poolsExpired:rows.filter(r=>r.state==='expired').length,
+  lowLiquidityOrUnsupported:rows.filter(r=>r.state==='excluded'||r.state==='unsupported'||r.state==='not_selected').length,
+  raydiumPairs:ray.length,orcaPools:orca.length,sizes,
+  theoreticalComparisons:theoretical,completeEstimates,
+  freshnessQualified,positiveEstimates,negativeEstimates,
+  comparisonCoveragePct:theoretical?Math.min(100,100*freshnessQualified/theoretical):0};
+}
