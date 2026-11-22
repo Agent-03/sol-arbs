@@ -567,3 +567,56 @@ try {
 ```
 
 If the selected trade size is larger than the pool's viable tick-array traversal, **do not lower the liquidity, timestamp, or slot safeguards** to manufacture a trade. Choose another pool or evaluate a smaller exact input as a separate research experiment. An SDK result with different tick-array slots remains inconclusive even when raw outputs happen to match.
+
+
+## Phase C3A — real mainnet transaction evidence (read-only, on demand)
+
+C3A is a historical sampling and attribution tool designed to answer: **Are there observed on-chain multi-DEX transactions worth investigating, and what can the RPC data actually prove?** C3A does not invent profitable trades, automatically execute transactions, or measure net USDC earnings from SOL costs without a historical price oracle.
+
+### Current capabilities
+
+- Samples **recent signatures mentioning selected monitored pool-state addresses**, spanning Raydium AMM V4, Raydium CLMM and Orca Whirlpool where available. A transaction can touch a watched pool without being an arbitrage; this is a **sample**, not full indexing or exhaustive search.
+- Fetches confirmed parsed mainnet transactions from a separate historical RPC `Connection`. It prefers `C3_HISTORY_RPC_URL`, then `SOLANA_BACKUP_RPC_URL`, then `SOLANA_RPC_URL`, so historical research will not enter the live quote engine's global HTTP queue. It has its **own** conservative limiter; the shared provider can still experience aggregate load.
+- Extracts signature, block time, slot, executed supported DEX program calls (from transaction logs), parsed token-transfer count, touched mints, fee-payer USDC inventory deltas (when token-account ownership is known), other changed mint balances, fee-payer native SOL delta and transaction network fee in lamports.
+- Reports statuses: `failed_transaction`, `no_detected_multi_swap`, `fee_payer_unattributed`, `inventory_open`, `usdc_nonpositive`, and `positive_usdc_before_sol_costs`. **Even the last status is NOT a verified arbitrage or a proven profitable trade:** USDC may have come from another transfer; the real searcher's beneficiary may be a PDA, and network fees, tips, rent, or execution risk may change the outcome.
+- Keeps `profitability: "unverified"`, `jitoTipLamports: null`, `netBusinessProfitUsd: null`, and `verifiedProfitableTransactions: 0`. It does not assume a USD value for SOL-denominated fees or guess Jito tips.
+- Writes limited extracted observations to `DATA_DIR/c3-onchain-evidence.jsonl`, not full private transaction objects or API credentials; loads recent records again on restart. The `data/` directory remains ignored by Git.
+- Offers `GET /api/c3` (observations, progress, classification counts, errors and limitations) and `POST /api/actions/c3-analyze` (starts a request). It is opt-in and subject to a 5-minute cooldown to protect your historical RPC budget.
+- Adds an **On-chain Evidence** tab and **Sample chain** button in the Activity Explorer at `http://127.0.0.1:8787/`. This is distinct from the unimplemented *full transaction indexer* and from the app's nonexistent executed wallet trades.
+
+### Run and inspect
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+In a second PowerShell window, start one sample, then poll status:
+
+```powershell
+$r = Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/actions/c3-analyze
+$r | Format-List
+if($r.accepted){
+  for($i=0; $i -lt 60; $i++){
+    Start-Sleep -Seconds 2
+    $e = Invoke-RestMethod http://127.0.0.1:8787/api/c3
+    if(-not $e.running){break}
+  }
+  $e.progress | Format-List
+  $e.summary | Format-List
+  $e.summary.topDexPrograms | Format-Table -AutoSize
+  $e.observations | Select-Object -First 12 signature,status,slot,feePayerUsdcDeltaUsd,networkFeeLamports,dexPrograms | Format-List
+  $e.errors
+}
+```
+
+Watch `progress.transactionsAnalyzed`, `summary.counts`, and `summary.topDexPrograms`. A result of zero positive candidates only says none were attributed in the **sample**, not that profitable arbitrage doesn't exist.
+
+### C3A completion boundaries
+
+C3A is a **first-pass independent evidence collector**, not a validated historical winner ledger. Reconstructing complete per-instruction swap paths (including program-derived inventories), separately detecting and costing Jito tips, historical SOL/USDC fee conversion, and full pool/token-wide indexing require deeper decoding or an indexed data source. Those are the next evidence-quality priorities before using historical winners to choose new live strategies.
+
+The local scanner still monitors the existing C2 SOL/USDC routes. C3A does not add liquidity venues or route directions to the live engine yet. **No signing, orders, wallet actions or transaction broadcasting** have been enabled.
