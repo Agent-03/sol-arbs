@@ -397,7 +397,8 @@ export class MeteoraDlmmMonitor{
     this.partialRefreshes++;
     entry.quoteFailure='incomplete_snapshot:'+(verdict.reason??'unknown');
     entry.retryAfter=Date.now()+Math.min(2000,this.effectiveRefreshMs);
-    if(verdict.reason==='bin_array_missing'||verdict.reason==='bin_array_wrong_pool')
+    if(verdict.reason?.startsWith('bin_array_missing')||
+      verdict.reason==='bin_array_wrong_pool')
      entry.needsReindex=true;
    }
    if(verdict.ok&&(entry.lastReady===false||
