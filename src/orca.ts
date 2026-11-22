@@ -133,6 +133,12 @@ export class OrcaMonitor{
    if(!rayQuotes.length)errors.push('No Raydium AMM v4 quotes available. Check /amm-v4 status and errors; cannot create cross-DEX routes.');
    const bySize=new Map<number,AmmV4Quote[]>();
    for(const q of rayQuotes){const size=Number(BigInt(q.inputRaw))/1e6;bySize.set(size,[...(bySize.get(size)??[]),q]);}
+   const extraBuys=this.getExtraBuys?.()??[];
+   const extraBySize=new Map<number,typeof extraBuys>();
+   for(const q of extraBuys){
+    const size=Number(BigInt(q.inputRaw))/1e6;
+    extraBySize.set(size,[...(extraBySize.get(size)??[]),q]);
+   }
    let completed=0;
    for(const pool of orca){
     if(this.rateLimitedUntil>Date.now())break;
@@ -167,6 +173,20 @@ export class OrcaMonitor{
          {pool:pool.address,venue:'orca',inputRaw:sell.inputRaw,outputRaw:sell.outputRaw,observedAt:sell.observedAt,slot:sell.poolSlot},
          this.assumedCostUsd)));
        }catch(e){this.addError(errors,`Raydium->Orca ${ray.pool}/${pool.address}`,e);}
+      }
+      // CLMM first-leg outputs require an Orca reverse SDK quote at that
+      // EXACT SOL input. Never interpolate from another output amount.
+      for(const clmm of extraBySize.get(size)??[]){
+       try{
+        const reverse=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,
+         'SOL_TO_USDC',BigInt(clmm.outputRaw),!sellTicksRefreshed);
+        sellTicksRefreshed=true;legs.push(reverse);this.publishLegs(reverse);
+        candidates.push(this.annotateLiquidity(evaluateRoute(size,
+         {pool:clmm.pool,venue:'raydium',inputRaw:clmm.inputRaw,outputRaw:clmm.outputRaw,
+          observedAt:clmm.observedAt,slot:clmm.slot},
+         {pool:pool.address,venue:'orca',inputRaw:reverse.inputRaw,outputRaw:reverse.outputRaw,
+          observedAt:reverse.observedAt,slot:reverse.poolSlot},this.assumedCostUsd)));
+       }catch(e){this.addError(errors,'CLMM->Orca '+clmm.pool+'/'+pool.address,e);}
       }
      }catch(e){this.addError(errors,`${pool.address} ${size}`,e);}
      this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address,currentSizeUsd:size}};
