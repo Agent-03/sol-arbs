@@ -350,6 +350,23 @@ export class LocalWhirlpoolQuoter{
   * Prevents old but unchanged tick arrays from being permanently rejected.
   */
  async refreshCachedSnapshots():Promise<void>{
+  // An active tick can cross into another array between discovery windows.
+  // Reprepare newly required arrays before interpreting this pool as ready.
+  for(const [pool,layout] of this.layouts){
+   const decoded=this.decodePool(pool);
+   if(!decoded)continue;
+   const a=this.tickKeys(pool,decoded.data,true);
+   const b=this.tickKeys(pool,decoded.data,false);
+   const oracle=PoolUtil.isInitializedWithAdaptiveFee(decoded.data)?
+    PDAUtil.getOracle(this.programId,new PublicKey(pool)).publicKey.toBase58():null;
+   if(JSON.stringify(a)!==JSON.stringify(layout.directions.A_TO_B)||
+      JSON.stringify(b)!==JSON.stringify(layout.directions.B_TO_A)||
+      oracle!==layout.oracleAddress){
+    try{await this.prepare(pool)}catch(error){
+     this.lastErrorReason.set(pool,'reprepare_failed:'+String(error).slice(0,90));
+    }
+   }
+  }
   const keys=new Set<string>();
   for(const [pool,layout] of this.layouts){
    keys.add(pool);
@@ -365,8 +382,13 @@ export class LocalWhirlpoolQuoter{
   if(!layout)return {ready:false,reason:'tick_arrays_not_prepared'};
   const aToB=decoded.data.tokenMintA.toBase58()===USDC_MINT;
   const required=this.tickKeys(pool,decoded.data,aToB);
-  if(!this.permittedMints&&
-   JSON.stringify(required)!==JSON.stringify(layout.directions.USDC_TO_SOL))
+  if(this.permittedMints){
+   if(JSON.stringify(this.tickKeys(pool,decoded.data,true))!==
+      JSON.stringify(layout.directions.A_TO_B)||
+      JSON.stringify(this.tickKeys(pool,decoded.data,false))!==
+      JSON.stringify(layout.directions.B_TO_A))
+    return {ready:false,reason:'tick_array_window_changed'};
+  }else if(JSON.stringify(required)!==JSON.stringify(layout.directions.USDC_TO_SOL))
    return {ready:false,reason:'tick_array_window_changed'};
   const pieces:Array<{slot:number;receivedAt:number}>=[
    this.verifiedObservation(decoded.observation)];
