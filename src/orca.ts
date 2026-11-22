@@ -10,7 +10,7 @@ import {LastKnownQuoteBook} from './quoteBook.js';
 
 export type OrcaQuote={
  pool:string;direction:'USDC_TO_SOL'|'SOL_TO_USDC';inputRaw:string;outputRaw:string;
- feeRaw:string;observedAt:string;computedAt?:string;tickArraysObservedAt?:string;tickArraySlot:null;poolSlot:number|null;classification:'indicative_non_executable';
+ feeRaw:string;observedAt:string;computedAt?:string;tickArraysObservedAt?:string;tickArraySlot?:null;poolSlot:number|null;classification:'indicative_non_executable';
 };
 export type ArbitrageCandidate={
  id:string;sizeUsd:number;buyVenue:'raydium'|'orca';sellVenue:'raydium'|'orca';
