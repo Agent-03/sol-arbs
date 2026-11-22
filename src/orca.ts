@@ -15,7 +15,7 @@ export type ArbitrageCandidate={
  id:string;sizeUsd:number;buyVenue:'raydium'|'orca';sellVenue:'raydium'|'orca';
  buyPool:string;sellPool:string;inputUsdcRaw:string;outputUsdcRaw:string;
  grossUsd:number;assumedCostUsd:number;indicativeNetUsd:number;
- buyObservedAt:string;sellObservedAt:string;buySlot:number|null;sellSlot:number|null;quoteAgeGapMs:number;
+ buyObservedAt:string;sellObservedAt:string;buySlot:number|null;sellSlot:number|null;buyLiquidityUsd?:number;sellLiquidityUsd?:number;quoteAgeGapMs:number;
  classification:'indicative_only';rejectionReasons:string[];
 };
 export type OrcaStatus={status:'idle'|'scanning'|'ok'|'partial_error';lastUpdatedAt?:string;
@@ -54,6 +54,11 @@ export class OrcaMonitor{
  }
  private readonly client:ReturnType<typeof buildWhirlpoolClient>;
  private readonly ctx:WhirlpoolContext;
+ private annotateLiquidity(candidate:ArbitrageCandidate):ArbitrageCandidate{
+  const buy=this.pools.find(p=>p.address===candidate.buyPool);
+  const sell=this.pools.find(p=>p.address===candidate.sellPool);
+  return {...candidate,buyLiquidityUsd:buy?.liquidityUsd,sellLiquidityUsd:sell?.liquidityUsd};
+ }
  constructor(private readonly connection:Connection,private readonly pools:DiscoveredPool[],
    private readonly sizesUsd:number[],private readonly getRaydiumQuotes:()=>AmmV4Quote[],
    private readonly assumedCostUsd:number,private readonly intervalMs=60000){
@@ -121,17 +126,17 @@ export class OrcaMonitor{
         const output=amountOutExactInput(solIn,BigInt(ray.reserveOutRaw),BigInt(ray.reserveInRaw),feeNum,feeDen);
         const candidate=evaluateRoute(size,{pool:pool.address,venue:'orca',inputRaw:buy.inputRaw,outputRaw:buy.outputRaw,observedAt:buy.observedAt,slot:buy.poolSlot},
          {pool:ray.pool,venue:'raydium',inputRaw:buy.outputRaw,outputRaw:output.toString(),observedAt:ray.observedAt,slot:ray.vaultSlot},this.assumedCostUsd);
-        candidates.push(candidate);
+        candidates.push(this.annotateLiquidity(candidate));
        }catch(e){this.addError(errors,`Orca->Raydium ${pool.address}/${ray.pool}`,e);}
       }
       // Buy Raydium, sell Orca at EXACT amount produced by first leg.
       for(const ray of bySize.get(size)??[]){
        try{
         const sell=await this.quote(pool.address,prepared.pool,prepared.poolSlot,'SOL_TO_USDC',BigInt(ray.outputRaw),!sellTicksRefreshed);sellTicksRefreshed=true;legs.push(sell);
-        candidates.push(evaluateRoute(size,
+        candidates.push(this.annotateLiquidity(evaluateRoute(size,
          {pool:ray.pool,venue:'raydium',inputRaw:ray.inputRaw,outputRaw:ray.outputRaw,observedAt:ray.observedAt,slot:ray.vaultSlot},
          {pool:pool.address,venue:'orca',inputRaw:sell.inputRaw,outputRaw:sell.outputRaw,observedAt:sell.observedAt,slot:sell.poolSlot},
-         this.assumedCostUsd));
+         this.assumedCostUsd)));
        }catch(e){this.addError(errors,`Raydium->Orca ${ray.pool}/${pool.address}`,e);}
       }
      }catch(e){this.addError(errors,`${pool.address} ${size}`,e);}
