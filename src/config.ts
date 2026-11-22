@@ -23,6 +23,7 @@ export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;po
  c3d41DlmmRefreshBudget:number;c3d41DlmmRefreshConcurrency:number;
  c3d42DlmmRpcDeadlineMs:number;c3d42DlmmReindexDeadlineMs:number;
  c3d42DlmmReindexConcurrency:number;
+ c3d43DlmmBootstrapConcurrency:number;
  jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
@@ -48,6 +49,7 @@ export function loadConfig():Config{
   rpcLimit:{
    minSpacingMs:nonNegativeInteger('RPC_HTTP_MIN_SPACING_MS',150),
    maxConcurrent:positiveInteger('RPC_HTTP_MAX_CONCURRENT',3),
+   backgroundMaxConcurrent:positiveInteger('RPC_BACKGROUND_MAX_CONCURRENT',1),
    maxRetries:nonNegativeInteger('RPC_HTTP_MAX_RETRIES',2),
    initialBackoffMs:positiveInteger('RPC_HTTP_429_BACKOFF_MS',5000),
    maxBackoffMs:positiveInteger('RPC_HTTP_429_MAX_BACKOFF_MS',60000)
@@ -60,6 +62,7 @@ export function loadConfig():Config{
   secondaryRpcLimit:{
    minSpacingMs:nonNegativeInteger('RPC_SECONDARY_HTTP_MIN_SPACING_MS',150),
    maxConcurrent:positiveInteger('RPC_SECONDARY_HTTP_MAX_CONCURRENT',3),
+   backgroundMaxConcurrent:positiveInteger('RPC_SECONDARY_BACKGROUND_MAX_CONCURRENT',1),
    maxRetries:nonNegativeInteger('RPC_HTTP_MAX_RETRIES',2),
    initialBackoffMs:positiveInteger('RPC_HTTP_429_BACKOFF_MS',5000),
    maxBackoffMs:positiveInteger('RPC_HTTP_429_MAX_BACKOFF_MS',60000)
@@ -150,6 +153,7 @@ export function loadConfig():Config{
   c3d42DlmmRpcDeadlineMs:positiveInteger('C3D42_DLMM_RPC_DEADLINE_MS',5500),
   c3d42DlmmReindexDeadlineMs:positiveInteger('C3D42_DLMM_REINDEX_DEADLINE_MS',11000),
   c3d42DlmmReindexConcurrency:positiveInteger('C3D42_DLMM_REINDEX_CONCURRENCY',2),
+  c3d43DlmmBootstrapConcurrency:positiveInteger('C3D43_DLMM_BOOTSTRAP_CONCURRENCY',1),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};
