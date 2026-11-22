@@ -14,6 +14,9 @@ export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;po
  c3dEnabled:boolean;c3dMaxTokens:number;c3dTokenRefreshMs:number;
  c3dPoolRefreshMs:number;c3dPoolQueryBudget:number;c3dPoolConcurrency:number;
  c3dMinPoolLiquidityUsd:number;c3dSizesSol:number[];c3dAssumedCostSol:number;
+ c3d2RegistryEnabled:boolean;c3d2RegistryTokensPerRefresh:number;
+ c3d2RegistryConcurrency:number;c3d2RegistryMaxPools:number;
+ c3d2RegistryTtlMs:number;c3d2RegistryMinLiquidityUsd:number;
  jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
@@ -117,6 +120,16 @@ export function loadConfig():Config{
   c3dMinPoolLiquidityUsd:nonNegativeNumber('C3D_MIN_POOL_LIQUIDITY_USD',5000),
   c3dSizesSol:sizes('C3D_SIZES_SOL','0.05,0.1,0.25,0.5,1,2'),
   c3dAssumedCostSol:nonNegativeNumber('C3D_ASSUMED_COST_SOL',0),
+  c3d2RegistryEnabled:(()=>{
+   const v=process.env.C3D2_REGISTRY_ENABLED??'1';
+   if(v!=='0'&&v!=='1')throw Error('C3D2_REGISTRY_ENABLED must be 0 or 1');
+   return v==='1';
+  })(),
+  c3d2RegistryTokensPerRefresh:positiveInteger('C3D2_REGISTRY_TOKENS_PER_REFRESH',20),
+  c3d2RegistryConcurrency:positiveInteger('C3D2_REGISTRY_CONCURRENCY',6),
+  c3d2RegistryMaxPools:positiveInteger('C3D2_REGISTRY_MAX_POOLS',350),
+  c3d2RegistryTtlMs:positiveInteger('C3D2_REGISTRY_TTL_MS',1200000),
+  c3d2RegistryMinLiquidityUsd:nonNegativeNumber('C3D2_REGISTRY_MIN_LIQUIDITY_USD',2500),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};
