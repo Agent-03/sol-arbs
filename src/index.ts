@@ -7,12 +7,12 @@ import {JupiterMonitor} from './jupiter.js';
 import {buildCandidates} from './routes.js';
 import {AmmV4Monitor} from './ammV4.js';
 import {OrcaMonitor} from './orca.js';
-import {RpcHttpLimiter} from './rpc.js';
+import {RpcProviderPool} from './rpcFailover.js';
 async function main(){
  const config=loadConfig();
  const jupiter=new JupiterMonitor(config.jupiter);
  jupiter.start();
- const rpcLimiter=new RpcHttpLimiter(config.rpcLimit);
+ const rpcLimiter=new RpcProviderPool(config.rpcUrl,config.backupRpcUrl,config.rpcLimit);
  const validationConnection=new Connection(config.rpcUrl,{commitment:'confirmed',wsEndpoint:config.wsUrl,fetch:rpcLimiter.fetch,disableRetryOnRateLimit:true});
  const discovered=await discoverPools(validationConnection,config.pools,config.maxPools);
  for(const warning of discovered.warnings)console.warn('[discovery]',warning);
