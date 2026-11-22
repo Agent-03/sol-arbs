@@ -1,20 +1,25 @@
 import {Connection,PublicKey,type EpochInfo} from '@solana/web3.js';
-import {Raydium,PoolUtils} from '@raydium-io/raydium-sdk-v2';
+import {Raydium,PoolUtils,PoolInfoLayout,TickArrayLayout,TickUtil} from '@raydium-io/raydium-sdk-v2';
 import BN from 'bn.js';
 import {SOL_MINT,USDC_MINT,type DiscoveredPool} from './discovery.js';
 import {RAYDIUM_CLMM} from './routes.js';
+import type {MarketDataFeed} from './marketData.js';
+import {validateLocalComponents} from './localWhirlpool.js';
 
 type ClmmSdkData=Awaited<ReturnType<InstanceType<typeof Raydium>['clmm']['getPoolInfoFromRpc']>>;
 type Cached={
  observedAt:string;finishedAt:string;slot:number;
  data:ClmmSdkData;epochInfo:EpochInfo;
  tickArrayCount:number;
+ tickKeys:string[];release:(()=>void)[];
+ tickArraySlot:number|null;verifiedCache:boolean;
 };
 export type ClmmQuote={
  pool:string;direction:'USDC_TO_SOL'|'SOL_TO_USDC';
  inputRaw:string;outputRaw:string;observedAt:string;computedAt:string;poolSlot:number;
  feeRaw:string;tickArraysObservedAt:string;tickArraySlot:null;
- quoteModel:'raydium_clmm_sdk_tick_array';snapshotIntegrity:'multi_rpc_context_unverified';
+ quoteModel:'raydium_clmm_sdk_tick_array';
+ snapshotIntegrity:'multi_rpc_context_unverified'|'same_context_cached';
 };
 export type ClmmHealth={
  status:'idle'|'scanning'|'ok'|'partial_error';
@@ -23,6 +28,8 @@ export type ClmmHealth={
    lastObservedAt?:string;ageMs?:number;tickArrays:number;slot?:number}>;
  scans:number;lastUpdatedAt?:string;
  poolAccountEvents?:number;selectiveScans?:number;pendingDirtyPools?:number;
+ localEvents?:number;localRecomputations?:number;activeTickSubscriptions?:number;
+ slotVerifiedPools?:number;
 };
 
 export function isClmmPair(a:string,b:string):boolean{
@@ -56,6 +63,8 @@ export class ClmmMonitor {
  private dirtyEvents=0;
  private selectiveScans=0;
  private lastSelectiveAt=0;
+ private feedListener?:()=>void;
+ private localEvents=0;private localRecomputations=0;
 
  constructor(
   private readonly connection:Connection,
@@ -65,8 +74,18 @@ export class ClmmMonitor {
   private readonly maxPools:number,
   private readonly scanIntervalMs:number,
   private readonly maxCacheAgeMs:number,
-  private readonly onUpdate:()=>void
- ){}
+  private readonly onUpdate:()=>void,
+  private readonly feed?:MarketDataFeed,
+  private readonly maxSlotSkew=12
+ ){
+  if(this.feed)this.feedListener=this.feed.onUpdate(update=>{
+   for(const poolId of update.affectedPools){
+    if(!this.cache.has(poolId))continue;
+    this.localEvents++;
+    if(this.applyFeedState(poolId))this.onUpdate();
+   }
+  });
+ }
  private chosen():DiscoveredPool[]{
   return this.pools.filter(p=>p.owner===RAYDIUM_CLMM&&
    (p.venue==='raydium'||p.venue==='manual')&&
@@ -81,9 +100,91 @@ export class ClmmMonitor {
  private selected(cache:Cached,now=Date.now()):boolean{
   return now-Date.parse(cache.observedAt)<=this.maxCacheAgeMs;
  }
+ private releaseCache(pool:string){
+  const previous=this.cache.get(pool);
+  if(!previous)return;
+  previous.release.forEach(stop=>stop());
+  this.cache.delete(pool);
+  if(this.feed?.hasDependencies(pool))this.feed.setDependencies(pool,[pool]);
+ }
+ /** Update cached CLMM swap parameters from the same slot-aware pool/tick
+  * account stream. No SDK/RPC request occurs in this callback.
+  */
+ private applyFeedState(pool:string):boolean{
+  const entry=this.cache.get(pool);
+  if(!entry||!this.feed)return false;
+  const poolState=this.feed.get(pool);
+  const tickStates=entry.tickKeys.map(key=>this.feed!.get(key));
+  if(!poolState||tickStates.some(t=>!t)){
+   entry.verifiedCache=false;
+   return false;
+  }
+  const observations=[poolState,...tickStates.filter((t):t is NonNullable<typeof t>=>Boolean(t))];
+  const valid=validateLocalComponents(observations,Date.now(),this.maxCacheAgeMs,this.maxSlotSkew);
+  if(!valid.ok){entry.verifiedCache=false;return false;}
+  try{
+   if(poolState.owner!==RAYDIUM_CLMM)throw new Error('CLMM owner changed');
+   const decoded=PoolInfoLayout.decode(poolState.data);
+   if(!decoded.mintA.equals(new PublicKey(entry.data.poolInfo.mintA.address))||
+      !decoded.mintB.equals(new PublicKey(entry.data.poolInfo.mintB.address)))
+    throw new Error('CLMM mint pair changed');
+   const ticks:NonNullable<ClmmSdkData['tickData'][string]>={};
+   for(let i=0;i<entry.tickKeys.length;i++){
+    const addr=entry.tickKeys[i],state=tickStates[i]!;
+    if(state.owner!==RAYDIUM_CLMM)throw new Error('CLMM tick owner changed');
+    const tick=TickArrayLayout.decode(state.data);
+    if(!tick.poolId.equals(new PublicKey(pool)))throw new Error('CLMM tick array points at wrong pool');
+    const expected=entry.data.tickArrays.find(row=>row.address.toBase58()===addr);
+    if(!expected||tick.startTickIndex!==expected.startTickIndex)throw new Error('Unexpected CLMM tick index');
+    ticks[tick.startTickIndex]={...tick,address:new PublicKey(addr)};
+   }
+   entry.data.computePoolInfo={
+    ...entry.data.computePoolInfo,
+    accInfo:decoded,liquidity:decoded.liquidity,sqrtPriceX64:decoded.sqrtPriceX64,
+    currentPrice:TickUtil.sqrtPriceX64ToPrice(decoded.sqrtPriceX64,
+     entry.data.poolInfo.mintA.decimals,entry.data.poolInfo.mintB.decimals),
+    tickCurrent:decoded.tickCurrent,tickArrayBitmap:decoded.tickArrayBitmap
+   };
+   entry.data.tickData[pool]=ticks;
+   entry.slot=valid.minSlot;
+   entry.tickArraySlot=Math.min(...tickStates.map(t=>t!.slot));
+   entry.observedAt=new Date(valid.oldestAt).toISOString();
+   entry.verifiedCache=true;
+   this.localRecomputations++;
+   return true;
+  }catch(error){
+   entry.verifiedCache=false;
+   this.errors.unshift(pool+': local CLMM decoding: '+String(error));
+   this.errors=this.errors.slice(0,10);
+   return false;
+  }
+ }
+ private async attachFeed(pool:string,entry:Cached):Promise<void>{
+  if(!this.feed)return;
+  const keys=[...new Set(entry.data.tickArrays.map(x=>x.address.toBase58()))];
+  if(!keys.length)throw new Error('SDK did not expose CLMM tick-array addresses');
+  const releases:(()=>void)[]=[];
+  try{
+   for(const address of keys){
+    this.feed.expectOwner(address,RAYDIUM_CLMM);
+    releases.push(this.feed.watch(address));
+   }
+   this.feed.setDependencies(pool,[pool,...keys]);
+   await this.feed.reconcile([pool,...keys],'rpc_bootstrap');
+   entry.tickKeys=keys;
+   entry.release=releases;
+   this.cache.set(pool,entry);
+   this.applyFeedState(pool);
+  }catch(error){
+   releases.forEach(stop=>stop());
+   this.feed.setDependencies(pool,[pool]);
+   throw error;
+  }
+ }
+
  quoteExact(pool:string,direction:'USDC_TO_SOL'|'SOL_TO_USDC',inputRaw:bigint):ClmmQuote|null{
   const cache=this.cache.get(pool);
-  if(!cache||!this.selected(cache))return null;
+  if(!cache||!this.selected(cache)||this.feed&&!cache.verifiedCache)return null;
   const {data,epochInfo}=cache;
   if(!isClmmPair(data.poolInfo.mintA.address,data.poolInfo.mintB.address))return null;
   if(data.poolInfo.programId!==RAYDIUM_CLMM)return null;
@@ -110,9 +211,9 @@ export class ClmmMonitor {
     pool,direction,inputRaw:inputRaw.toString(),outputRaw,
     observedAt:cache.observedAt,computedAt:new Date().toISOString(),
     poolSlot:cache.slot,feeRaw:estimate.fee.toString(),
-    tickArraysObservedAt:cache.observedAt,tickArraySlot:null,
+    tickArraysObservedAt:cache.observedAt,tickArraySlot:cache.tickArraySlot,
     quoteModel:'raydium_clmm_sdk_tick_array',
-    snapshotIntegrity:'multi_rpc_context_unverified'
+    snapshotIntegrity:cache.verifiedCache?'same_context_cached':'multi_rpc_context_unverified'
    };
   }catch{return null;}
  }
@@ -133,7 +234,7 @@ export class ClmmMonitor {
    const allSelected=this.chosen();
    const selected=onlyPools?allSelected.filter(pool=>onlyPools.has(pool.address)):allSelected;
    const valid=new Set(allSelected.map(p=>p.address));
-   for(const pool of this.cache.keys())if(!valid.has(pool))this.cache.delete(pool);
+   for(const pool of this.cache.keys())if(!valid.has(pool))this.releaseCache(pool);
    for(const pool of selected){
     this.refreshing=pool.address;
     const started=new Date().toISOString();
@@ -149,8 +250,15 @@ export class ClmmMonitor {
      const ticks=data.tickData[pool.address];
      if(!ticks||!Object.keys(ticks).length)throw new Error('missing or uninitialized tick arrays');
      const entry:Cached={observedAt:started,finishedAt:new Date().toISOString(),
-      slot:checked.context.slot,data,epochInfo,tickArrayCount:Object.keys(ticks).length};
-     this.cache.set(pool.address,entry);
+      slot:checked.context.slot,data,epochInfo,tickArrayCount:Object.keys(ticks).length,
+      tickKeys:[],release:[],tickArraySlot:null,verifiedCache:!this.feed};
+     if(this.feed){
+      // The old snapshot stays available until the new one is installed.
+      // A rejected candidate snapshot is not silently called coherent.
+      await this.attachFeed(pool.address,entry);
+     }else this.cache.set(pool.address,entry);
+     const old=this.cache.get(pool.address);
+     if(old!==entry&&old)old.release.forEach(stop=>stop());
      this.failures.delete(pool.address);
      this.onUpdate();
     }catch(e){
@@ -198,7 +306,10 @@ export class ClmmMonitor {
   void loop();
  }
  stop(){this.running=false;if(this.timer)clearTimeout(this.timer);
-  if(this.requestTimer)clearTimeout(this.requestTimer);this.pendingDirty.clear();}
+  if(this.requestTimer)clearTimeout(this.requestTimer);this.pendingDirty.clear();
+  this.feedListener?.();this.feedListener=undefined;
+  for(const pool of [...this.cache.keys()])this.releaseCache(pool);
+ }
  snapshot():ClmmHealth{
   const now=Date.now();
   const selected=this.chosen();
@@ -206,7 +317,7 @@ export class ClmmMonitor {
    const cache=this.cache.get(p.address);
    const ageMs=cache?now-Date.parse(cache.observedAt):undefined;
    const status:'fresh'|'expired'|'missing'|'refreshing'=this.refreshing===p.address?'refreshing':
-    !cache?'missing':this.selected(cache,now)?'fresh':'expired';
+    !cache?'missing':!cache.verifiedCache?'expired':this.selected(cache,now)?'fresh':'expired';
    return {pool:p.address,status,reason:this.failures.get(p.address),
     lastObservedAt:cache?.observedAt,ageMs,tickArrays:cache?.tickArrayCount??0,slot:cache?.slot};
   });
@@ -214,6 +325,9 @@ export class ClmmMonitor {
   return {status:this.busy?'scanning':this.failures.size?'partial_error':'ok',
    selectedPools:selected.length,readyPools:perPool.filter(p=>p.status==='fresh').length,
    quotes,errors:[...this.errors],perPool,scans:this.scans,lastUpdatedAt:this.lastUpdatedAt,
-   poolAccountEvents:this.dirtyEvents,selectiveScans:this.selectiveScans,pendingDirtyPools:this.pendingDirty.size};
+   poolAccountEvents:this.dirtyEvents,selectiveScans:this.selectiveScans,pendingDirtyPools:this.pendingDirty.size,
+   localEvents:this.localEvents,localRecomputations:this.localRecomputations,
+   activeTickSubscriptions:[...this.cache.values()].reduce((sum,x)=>sum+x.release.length,0),
+   slotVerifiedPools:[...this.cache.values()].filter(x=>x.verifiedCache).length};
  }
 }
