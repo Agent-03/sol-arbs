@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {Connection,type AccountInfo} from '@solana/web3.js';
+import {Connection,PublicKey,type AccountInfo} from '@solana/web3.js';
 import type {Config} from './config.js';
 import {Journal,type PoolEvent} from './store.js';
 export type PoolState={address:string;slot:number;observedAt:string;source:'websocket'|'poll';owner:string;lamports:number;dataLength:number;dataHash:string};
@@ -7,7 +7,7 @@ export class Scanner{
  private conn:Connection;
  private journal:Journal;
  private state=new Map<string,PoolState>();
- private ids:number[]=[];
+ private ids=new Map<string,number>();
  private timer?:ReturnType<typeof setInterval>;
  private running=false;
  private lastPollAt?:string;
@@ -47,20 +47,38 @@ export class Scanner{
    console.error('RPC poll failed',error);
   }finally{this.pollInFlight=false;}
  }
+ private async subscribe(pool:PublicKey){
+  const address=pool.toBase58();
+  if(this.ids.has(address))return;
+  try{
+   const id=this.conn.onAccountChange(pool,(info,context)=>{
+    void this.ingest(address,info,context.slot,'websocket').catch(e=>{this.errors++;console.error('WS ingest error',e);});
+   },'confirmed');
+   this.ids.set(address,id);
+  }catch(error){
+   this.errors++;
+   await this.record({kind:'subscription_error',address,source:'system',observedAt:new Date().toISOString(),error:String(error)});
+  }
+ }
+ async replacePools(next:PublicKey[]){
+  const addresses=new Set(next.map(k=>k.toBase58()));
+  if(this.running){
+   // Subscribe newly discovered pools before removing obsolete subscriptions.
+   for(const pool of next)await this.subscribe(pool);
+   for(const [address,id] of this.ids){
+    if(addresses.has(address))continue;
+    this.ids.delete(address);
+    this.state.delete(address);
+    try{await this.conn.removeAccountChangeListener(id);}
+    catch(error){this.errors++;console.error('WS unsubscribe error',error);}
+   }
+  }
+  this.config.pools=[...next];
+ }
  async start(){
   if(this.running)return;
   this.running=true;
-  for(const pool of this.config.pools){
-   const address=pool.toBase58();
-   try{
-    this.ids.push(this.conn.onAccountChange(pool,(info,context)=>{
-     void this.ingest(address,info,context.slot,'websocket').catch(e=>{this.errors++;console.error('WS ingest error',e);});
-    },'confirmed'));
-   }catch(error){
-    this.errors++;
-    await this.record({kind:'subscription_error',address,source:'system',observedAt:new Date().toISOString(),error:String(error)});
-   }
-  }
+  for(const pool of this.config.pools)await this.subscribe(pool);
   await this.poll();
   this.timer=setInterval(()=>{void this.poll();},this.config.pollIntervalMs);
  }
@@ -76,7 +94,7 @@ export class Scanner{
  async stop(){
   this.running=false;
   if(this.timer)clearInterval(this.timer);
-  await Promise.allSettled(this.ids.map(id=>this.conn.removeAccountChangeListener(id)));
+  await Promise.allSettled([...this.ids.values()].map(id=>this.conn.removeAccountChangeListener(id)));
   this.ids=[];
  }
 }
