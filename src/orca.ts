@@ -19,7 +19,8 @@ export type ArbitrageCandidate={
  classification:'indicative_only';rejectionReasons:string[];
 };
 export type OrcaStatus={status:'idle'|'scanning'|'ok'|'partial_error';lastUpdatedAt?:string;
- quotedLegs:OrcaQuote[];routeCandidates:ArbitrageCandidate[];errors:string[];orcaPools:number;};
+ quotedLegs:OrcaQuote[];routeCandidates:ArbitrageCandidate[];errors:string[];orcaPools:number;
+ progress?:{totalPools:number;completedPools:number;quotesCompleted:number;routesEstimated:number;currentPool?:string;currentSizeUsd?:number};};
 
 export function evaluateRoute(
  sizeUsd:number,buy:{pool:string;venue:'raydium'|'orca';inputRaw:string;outputRaw:string;observedAt:string;slot?:number|null},
@@ -99,23 +100,26 @@ export class OrcaMonitor{
    return;
   }
   this.busy=true;
-  this.state={...this.state,status:'scanning'};
-  const orca=this.pools.filter(p=>p.venue==='orca'&&p.owner===ORCA_WHIRLPOOL);
+  const orca=this.pools.filter(p=>(p.venue==='orca'||p.venue==='manual')&&p.owner===ORCA_WHIRLPOOL);
+  this.state={...this.state,status:'scanning',progress:{totalPools:orca.length,completedPools:0,quotesCompleted:0,routesEstimated:0}};
   const legs:OrcaQuote[]=[],candidates:ArbitrageCandidate[]=[],errors:string[]=[];
   try{
    const rayQuotes=this.getRaydiumQuotes();
    if(!rayQuotes.length)errors.push('No Raydium AMM v4 quotes available. Check /amm-v4 status and errors; cannot create cross-DEX routes.');
    const bySize=new Map<number,AmmV4Quote[]>();
    for(const q of rayQuotes){const size=Number(BigInt(q.inputRaw))/1e6;bySize.set(size,[...(bySize.get(size)??[]),q]);}
+   let completed=0;
    for(const pool of orca){
     if(this.rateLimitedUntil>Date.now())break;
+    this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address}};
     let prepared: {pool:Whirlpool;poolSlot:number};
     try{prepared=await this.preparePool(pool.address);}
-    catch(e){this.addError(errors,`Orca pool ${pool.address}`,e);if(this.rateLimitedUntil>Date.now())break;continue;}
+    catch(e){this.addError(errors,`Orca pool ${pool.address}`,e);completed++;if(this.rateLimitedUntil>Date.now())break;continue;}
     let buyTicksRefreshed=false;
     let sellTicksRefreshed=false;
     for(const size of this.sizesUsd){
      if(this.rateLimitedUntil>Date.now())break;
+     this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address,currentSizeUsd:size}};
      const amount=BigInt(Math.round(size*1e6));
      try{
       const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;legs.push(buy);
@@ -140,12 +144,14 @@ export class OrcaMonitor{
        }catch(e){this.addError(errors,`Raydium->Orca ${ray.pool}/${pool.address}`,e);}
       }
      }catch(e){this.addError(errors,`${pool.address} ${size}`,e);}
+     this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address,currentSizeUsd:size}};
     }
+    completed++;
    }
   }finally{
    this.busy=false;
    this.state={status:errors.length?'partial_error':'ok',lastUpdatedAt:new Date().toISOString(),
-    quotedLegs:legs,routeCandidates:candidates,errors,orcaPools:orca.length};
+    quotedLegs:legs,routeCandidates:candidates,errors,orcaPools:orca.length,progress:{totalPools:orca.length,completedPools:orca.length,quotesCompleted:legs.length,routesEstimated:candidates.length}};
   }
  }
  start(){if(this.running)return;this.running=true;const loop=async()=>{if(!this.running)return;try{await this.scanOnce();}catch(e){this.state={...this.state,status:'partial_error',errors:[String(e)]};}if(this.running)this.timer=setTimeout(()=>{void loop();},this.intervalMs);};void loop();}
