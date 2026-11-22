@@ -9,6 +9,8 @@ import {MarketEngine} from './engine.js';
 import {dashboardHtml} from './dashboard.js';
 import {explorerHtml} from './explorerDashboard.js';
 import {MarketDataFeed} from './marketData.js';
+import {RpcHttpLimiter} from './rpc.js';
+import {ChainHistorySampler,chooseEvidenceSeedPools} from './c3ChainHistory.js';
 
 async function main(){
  const config=loadConfig();
@@ -24,6 +26,20 @@ async function main(){
  const marketData=new MarketDataFeed(connection,config.freshness.maxAgeMs,config.freshness.maxSlotSkew);
  const scanner=new Scanner(config,connection,marketData);
  const engine=new MarketEngine(connection,config,scanner,rpcLimiter,jupiter,discovered,manualPools,marketData);
+ // History research is intentionally opt-in and uses a separate, slower HTTP
+ // lane, preferring the backup endpoint. Never block quote RPC for archaeology.
+ const historyRpc=new Connection(config.c3HistoryRpcUrl??config.backupRpcUrl??config.rpcUrl,{
+  commitment:'confirmed',disableRetryOnRateLimit:true,
+  fetch:new RpcHttpLimiter({...config.rpcLimit,
+   minSpacingMs:config.c3HistoryMinSpacingMs,maxRetries:1}).fetch
+ });
+ const history=new ChainHistorySampler(historyRpc,config.dataDir,{
+  maxSeedPools:config.c3SamplePoolCount,
+  signaturesPerPool:config.c3SignaturesPerPool,
+  maxTransactions:config.c3MaxTransactions,
+  cooldownMs:config.c3ScanCooldownMs,maxRows:500
+ });
+ await history.initialize();
  console.log(JSON.stringify({event:'discovery_complete',pools:discovered.pools.length,
   validatedCandidateAccounts:discovered.validatedCount,
   theoreticalRoutes:engine.getTopology().candidates.length,warnings:discovered.warnings}));
@@ -42,12 +58,15 @@ async function main(){
     res.end(path==='/terminal'?dashboardHtml:explorerHtml);
     return;
    }
-   if(req.method==='POST'&&(path==='/api/actions/scan'||path==='/api/actions/discover'||path==='/api/actions/validate')){
+   if(req.method==='POST'&&(path==='/api/actions/scan'||path==='/api/actions/discover'||path==='/api/actions/validate'||path==='/api/actions/c3-analyze')){
     // Loopback only: reject cross-site browser POSTs (no write actions on chain).
     const allowed='http://127.0.0.1:'+config.port;
     const origin=req.headers.origin;
     if(origin && origin!==allowed){send(403,{accepted:false,message:'Foreign origin rejected'});return;}
-    const result=path.endsWith('/scan')?engine.requestScan():path.endsWith('/validate')?engine.requestC2Validation():engine.requestDiscovery();
+    const result=path.endsWith('/c3-analyze')
+     ?history.request(chooseEvidenceSeedPools(engine.getDiscovered().pools,config.c3SamplePoolCount))
+     :path.endsWith('/scan')?engine.requestScan():path.endsWith('/validate')
+     ?engine.requestC2Validation():engine.requestDiscovery();
     send(result.accepted?202:429,result);
     return;
    }
@@ -55,6 +74,7 @@ async function main(){
    const dashboard=()=>engine.dashboard();
    if(path==='/api/dashboard'){send(200,dashboard());return;}
    if(path==='/api/c2'){send(200,{phase:'C2',readOnly:true,...dashboard().c2,executableRoutes:0});return;}
+   if(path==='/api/c3'){send(200,history.snapshot());return;}
    if(path==='/api/market-data'){send(200,{phase:'C1',readOnly:true,...marketData.snapshot(),warning:'Account-state cache only; SDK tick arrays may be older or from unrelated RPC contexts.'});return;}
    if(path==='/api/explorer'){
     const d=dashboard();
@@ -66,7 +86,11 @@ async function main(){
      mode:'READ_ONLY',observedAt:d.now,market:'SOL/USDC',phase:d.phase,
      summary:{status:d.status,opportunities:d.opportunities,
       utility:d.discovery.utility,orca:d.orca,clmm:d.clmm,
-      raydium:d.raydium,b5:d.b5,c1:d.c1,c2:d.c2,scan:d.scan,rpc:d.rpc},
+      raydium:d.raydium,b5:d.b5,c1:d.c1,c2:d.c2,scan:d.scan,rpc:d.rpc,
+      c3:{running:history.snapshot().running,
+       startedAt:history.snapshot().startedAt,finishedAt:history.snapshot().finishedAt,
+       progress:history.snapshot().progress,summary:history.snapshot().summary}},
+     chainEvidence:history.snapshot().observations.slice(0,40),
      routes:candidates,quotes:{orca,raydium,clmm},
      pools:d.discovery.eligibility,events:d.activity,
      transactionIndexing:false,
