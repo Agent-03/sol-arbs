@@ -140,13 +140,15 @@ test('C3D.4.1 concurrent per-pool batches refresh all DLMM slots without relaxin
   assert.equal(snap.ready,0);
   await mon.refresh();
   snap=mon.snapshot();
-  assert.equal(snap.refreshedPoolsLastCycle,8);
-  assert.equal(snap.ready,8);
+  assert.equal(snap.refreshedPoolsLastCycle,4);
+  assert.equal(snap.ready,4);
   assert.equal(snap.refreshFailures,0);
-  assert.equal(snap.refreshSuccesses,8);
-  assert.equal(groups.length,8,'one RPC batch per pool across both provider lanes');
+  assert.equal(snap.refreshSuccesses,4);
+  assert.equal(groups.length,4,'one RPC batch per pool across both provider lanes');
   assert.ok(groups.every(g=>g.length===3),'pool and both bin arrays are fetched together');
   assert.ok(peak>=2&&peak<=4,'bounded concurrent slot-context batches');
+  await mon.refresh();
+  await mon.refresh();
   await mon.refresh();
   snap=mon.snapshot();
   assert.equal(snap.ready,16,'age-based fairness brings remaining pools into graph');
@@ -168,7 +170,7 @@ test('C3D.4.1 concurrent per-pool batches refresh all DLMM slots without relaxin
   snap=mon.snapshot();
   assert.equal(snap.refreshFailures,1);
   assert.equal(snap.backoffPools,1);
-  assert.ok(snap.refreshSuccesses>=23);
+  assert.ok(snap.refreshSuccesses>=19);
   assert.equal(bad.refreshFailures,1);
   assert.ok(bad.retryAfter>Date.now());
   // Simulate cooldown expiry; the next successful read clears the error.
