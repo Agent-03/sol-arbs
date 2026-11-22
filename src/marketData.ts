@@ -11,7 +11,7 @@ export type MarketUpdate=MarketObservation&{affectedPools:string[]};
 export type MarketHealth={
  mode:'websocket_account_cache';trackedAccounts:number;watchedAccounts:number;
  poolDependencies:number;readyPools:number;stalePools:number;
- missingDependencies:number;slotSkewPools:number;
+ missingDependencies:number;slotSkewPools:number;verifiedAbsentAccounts:number;
  updates:number;wsUpdates:number;rpcUpdates:number;geyserUpdates:number;
  duplicateUpdates:number;olderSlotDrops:number;ownerMismatchDrops:number;
  lastReceivedAt?:string;lastStreamReceivedAt?:string;
@@ -29,6 +29,7 @@ export type MarketHealth={
  */
 export class MarketDataFeed{
  private accounts=new Map<string,MarketObservation>();
+ private readonly absent=new Map<string,{slot:number;receivedAt:number}>();
  private subscriptions=new Map<string,{id:number;count:number}>();
  private expectedOwners=new Map<string,string>();
  private poolDeps=new Map<string,Set<string>>();
@@ -79,7 +80,14 @@ export class MarketDataFeed{
  private evictIfUnused(address:string){
   if(this.subscriptions.has(address)||this.reverseDeps.has(address))return;
   this.accounts.delete(address);
+  this.absent.delete(address);
   this.expectedOwners.delete(address);
+ }
+ getVerifiedAbsent(address:string):{slot:number;receivedAt:number}|undefined{
+  const value=this.absent.get(address);
+  const present=this.accounts.get(address);
+  if(!value||present&&present.slot>=value.slot)return undefined;
+  return {...value};
  }
  get(address:string):MarketObservation|undefined{
   const value=this.accounts.get(address);
@@ -113,6 +121,7 @@ export class MarketDataFeed{
   const value:MarketObservation={address,owner,data,lamports:info.lamports,executable:info.executable,
    rentEpoch:info.rentEpoch,slot,source,receivedAt,hash,verifiedAt:receivedAt};
   this.accounts.set(address,value);
+  this.absent.delete(address);
   this.updates++;
   if(source==='websocket')this.wsUpdates++;
   else if(source==='geyser')this.geyserUpdates++;
@@ -163,7 +172,13 @@ export class MarketDataFeed{
    const at=Date.now();
    values.value.forEach((info,i)=>{
     if(info)this.ingest(batch[i],info,values.context.slot,source,at);
-    else this.addError('Missing account '+batch[i]+' at slot '+values.context.slot);
+    else{
+     const address=batch[i],existing=this.accounts.get(address);
+     if(!existing||existing.slot<=values.context.slot){
+      this.accounts.delete(address);
+      this.absent.set(address,{slot:values.context.slot,receivedAt:at});
+     }
+    }
    });
   }
  }
@@ -186,6 +201,7 @@ export class MarketDataFeed{
    readyPools:pools.filter(p=>p.state==='ready').length,
    stalePools:pools.filter(p=>p.state==='stale').length,
    missingDependencies:pools.filter(p=>p.state==='missing').length,
+   verifiedAbsentAccounts:this.absent.size,
    slotSkewPools:pools.filter(p=>p.state==='slot_skew').length,
    updates:this.updates,wsUpdates:this.wsUpdates,rpcUpdates:this.rpcUpdates,
    geyserUpdates:this.geyserUpdates,duplicateUpdates:this.duplicateUpdates,
