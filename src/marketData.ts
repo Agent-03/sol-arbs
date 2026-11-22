@@ -169,13 +169,23 @@ export class MarketDataFeed{
   });
  }
  /** One RPC context per chunk, never treating different chunks as same-slot. */
- async reconcile(addresses:readonly string[],source:'rpc_poll'|'rpc_reconcile'|'rpc_bootstrap'='rpc_reconcile'){
+ async reconcile(addresses:readonly string[],
+  source:'rpc_poll'|'rpc_reconcile'|'rpc_bootstrap'='rpc_reconcile',
+  maxResponseLatencyMs?:number){
+  if(maxResponseLatencyMs!==undefined&&(!Number.isSafeInteger(maxResponseLatencyMs)||
+   maxResponseLatencyMs<1))throw Error('Invalid RPC response latency limit');
   const distinct=[...new Set(addresses)];
   for(let offset=0;offset<distinct.length;offset+=75){
    const batch=distinct.slice(offset,offset+75);
+   const startedAt=Date.now();
    const values=await this.connection.getMultipleAccountsInfoAndContext(
     batch.map(address=>new PublicKey(address)),'confirmed');
    const at=Date.now();
+   // A response arriving after the caller's timeout can no longer prove
+   // *current* quote freshness, even if its RPC slot appears monotonic.
+   // Discard the whole batch before touching shared accounts/absence caches.
+   if(maxResponseLatencyMs!==undefined&&at-startedAt>maxResponseLatencyMs)
+    throw Error('rpc_response_deadline_exceeded');
    values.value.forEach((info,i)=>{
     if(info)this.ingest(batch[i],info,values.context.slot,source,at);
     else{
