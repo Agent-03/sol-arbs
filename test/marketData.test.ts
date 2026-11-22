@@ -99,3 +99,27 @@ test('RPC bootstrap reads a single context per group and dispatches account depe
  assert.deepEqual(affected,['pool-one','pool-one','pool-one']);
  await feed.stop();
 });
+
+test('C3D.4.2 discards delayed RPC responses instead of marking old quotes fresh',async()=>{
+ const address=new PublicKey(Buffer.alloc(32,155)).toBase58();
+ const owner=new PublicKey(Buffer.alloc(32,156));
+ let respond!:()=>void;
+ const hold=new Promise<void>(resolve=>{respond=resolve});
+ const rpc={
+  getMultipleAccountsInfoAndContext:async()=>{
+   await hold;
+   return {context:{slot:150},value:[{
+    owner,data:Buffer.from([1,2,3]),lamports:100,executable:false,rentEpoch:0
+   }]};
+  }
+ } as unknown as Connection;
+ const feed=new MarketDataFeed(rpc);
+ try{
+  const read=feed.reconcile([address],'rpc_reconcile',25);
+  await new Promise(resolve=>setTimeout(resolve,40));
+  respond();
+  await assert.rejects(read,/rpc_response_deadline_exceeded/);
+  assert.equal(feed.get(address),undefined,'expired RPC responses cannot refresh cache');
+  assert.equal(feed.getVerifiedAbsent(address),undefined);
+ }finally{respond();await feed.stop()}
+});
