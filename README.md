@@ -468,3 +468,48 @@ $d.opportunities | Select-Object total,comparable,excluded,positive,bestComparab
 ```
 
 **Validation status:** The repository changes and fixture tests are committed. The complete TypeScript build, unit suite, Solana WebSocket reconnect behavior, SDK compatibility and live RPC throughput must be verified on the machine running the service. If a build or test fails, capture the output rather than treating the changes as production-ready.
+
+
+## Phase C2 — local tick-array pricing (experimental, READ ONLY)
+
+C2 builds on C1's normalized WebSocket pool cache, replacing repeated SDK/RPC calls **on the quote-calculation hot path when the requisite accounts are available and slot-bounded**. Exact swap math uses the DEX SDKs rather than a spot-price approximation or hand-rolled float formula.
+
+### Implemented
+
+- **Orca Whirlpool:** `src/localWhirlpool.ts` uses the existing `@orca-so/whirlpools-sdk` public `swapQuoteWithParams` calculator with account bytes decoded from the C1 cache. It subscribes to both directions' tick-array addresses and batches initial pool/tick reads in one RPC context. One SDK mint/epoch metadata read remains necessary on bootstrap. For legacy SPL SOL/USDC mints, tick arrays verified **absent** by an RPC response at a known slot can be treated as uninitialized. **Unknown** missing arrays are *not* guessed to be empty. Adaptive-fee/Token-2022 pools are excluded from the local path, not approximated. The original Orca RPC SDK quote remains a fallback for incomplete, expired or unsupported local snapshots.
+- **Live local updates:** Whirlpool pool/tick WebSocket notifications from C1 trigger fresh local USDC→SOL quotes without another RPC call. Pool-state changes that move the required tick window fail closed until a new tick-array bootstrap. Existing full-mode reverse quotes remain available, but the default `B5_2_ORCA_QUOTE_MODE=fast` intentionally monitors only Orca→Raydium at the smallest quote size.
+- **Raydium CLMM:** `src/clmm.ts` uses SDK `PoolUtils.computeAmountOut` on cached pool and decoded tick-array bytes, plus the CLMM fee-config and bitmap-extension accounts. Every updated account carries an independent slot and observation timestamp; only dependencies within the configured age/slot limits are treated as locally usable. The initial SDK snapshot is still required to discover the tick-array set, mint metadata and compute context, and periodic SDK refreshes remain for reconciliation. The scanner deliberately does not claim atomic state, verified execution fees or synchronized epochs across all third-party services.
+- **Read-only SDK reference check:** A cooldown-limited `POST /api/actions/validate` checks one locally ready Whirlpool against an independent Orca RPC SDK quote, recording raw-unit differences and `match`, `mismatch`, `inconclusive` or `error`. Unrelated tick-array RPC slots mean even a `match` is **observational parity, not same-slot or execution validation**.
+- **Diagnostics:** `GET /api/c2`, `GET /api/dashboard` (`c2`), and `GET /api/explorer` (`summary.c2`) show cached quotes, locally ready pools, SDK fallbacks, CLMM slot-bounded pools, quote computations, errors and reference-match counters. The two dashboards have C2 health panels; the Activity Explorer can request a comparison through its **Verify SDK quote** button. Quote rows distinguish locally derived SDK math from SDK/RPC reads.
+- **Safety and rollout:** `C2_LOCAL_QUOTES_ENABLED=1` is on by default. Use `C2_LOCAL_QUOTES_ENABLED=0` to restore the B5.2 RPC-backed quoting path if the C2 feed exhibits a live provider compatibility issue. No signing, wallet transaction or broadcast path is included.
+
+### Important interpretation
+
+A pool can be C1 **ready** with only its pool account while the C2 pricing state remains **unready** because price-sensitive tick arrays, fee config, bitmap extension, or oracle data are missing or outside the research freshness window. **Do not** interpret these values as confirmed executable arbitrage. We still need independent exchange-state parity testing across diverse real pool snapshots and shadow-trade economics before even considering live orders. C2 shortens the code path *once snapshots are ready*; it does not guarantee the provider actually delivers those snapshots quickly enough.
+
+### Windows PowerShell run and diagnostics
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Open `http://127.0.0.1:8787/` (Explorer) or `http://127.0.0.1:8787/terminal`. In another window:
+
+```powershell
+$d = Invoke-RestMethod http://127.0.0.1:8787/api/dashboard
+$d.c2 | Format-List
+$d.c2.orcaLocal | Format-List
+$d.c2.clmmLocal | Format-List
+$d.opportunities | Select-Object total,comparable,excluded,positive,bestComparableNetUsd
+
+# Optional, once local state is ready. This is quote research, NOT trading:
+Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/actions/validate
+# After the comparison returns asynchronously:
+(Invoke-RestMethod http://127.0.0.1:8787/api/c2).referenceValidation | Format-List
+```
+
+**C2 success criteria for the live test:** at least one Whirlpool or CLMM pool with all needed, slot-bounded account dependencies; growing offline quote counts without a corresponding RPC request per calculation; reference comparisons annotated with exact output deltas; and unaltered quote-age and slot rejection rules. A passing build/test suite only establishes fixture correctness. Real throughput and profitability remain **unproven** until live diagnostics and economic testing.
