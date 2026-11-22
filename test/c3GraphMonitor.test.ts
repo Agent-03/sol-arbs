@@ -63,7 +63,11 @@ test('C3B bootstrap uses bounded RPC and recomputes from websocket bytes without
   const mint2=url.searchParams.get('mint2');
   const matched=pairs.filter(p=>[assets[p.a].mint,assets[p.b].mint].every(m=>m===mint1||m===mint2));
   return new Response(JSON.stringify({success:true,data:{data:matched.map(p=>({
-   id:p.id,mintA:{address:assets[p.a].mint},mintB:{address:assets[p.b].mint},tvl:500000
+   id:p.id,
+   // API mint ordering is not trusted: one result is deliberately reversed.
+   mintA:{address:p.id===pairs[1].id?assets[p.b].mint:assets[p.a].mint},
+   mintB:{address:p.id===pairs[1].id?assets[p.a].mint:assets[p.b].mint},
+   tvl:500000
   }))}}),{status:200,headers:{'content-type':'application/json'}});
  }) as typeof fetch;
  let rpcRequests=0,subs=0,nextId=0;
@@ -90,6 +94,7 @@ test('C3B bootstrap uses bounded RPC and recomputes from websocket bytes without
   await new Promise<void>(resolve=>setTimeout(resolve,80));
   const before=graph.snapshot();
   assert.equal(before.trackedPools,3);
+  assert.deepEqual(before.discoveryStats,{apiCandidates:3,validatedV4:3,selected:3});
   assert.equal(before.watchedAccounts,9);
   assert.equal(subs,9);
   assert.equal(before.rpcReconciles,1);
