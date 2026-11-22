@@ -19,6 +19,7 @@ export type GraphMonitorOptions={
 export type GraphMonitorSnapshot=GraphEvaluation&{
  status:'disabled'|'discovering'|'warming'|'monitoring'|'partial_error'|'stopped';
  trackedPools:number;watchedAccounts:number;rpcReconciles:number;
+ discoveryStats:{apiCandidates:number;validatedV4:number;selected:number};
  wsUpdates:number;localEvaluations:number;lastDiscoveryAt?:string;
  lastReconcileAt?:string;errors:string[];
 };
@@ -74,6 +75,7 @@ export class C3GraphMonitor{
  private evaluationTimer?:ReturnType<typeof setTimeout>;
  private lastDiscoveryAt?:string;private lastReconcileAt?:string;
  private rpcReconciles=0;private wsUpdates=0;private localEvaluations=0;
+ private discoveryStats={apiCandidates:0,validatedV4:0,selected:0};
  private errors:string[]=[];
  private evaluation:GraphEvaluation;
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
@@ -90,6 +92,7 @@ export class C3GraphMonitor{
   return {...this.evaluation,candidates:[...this.evaluation.candidates],
    status:this.status,trackedPools:this.nodes.size,watchedAccounts:this.byAccount.size,
    rpcReconciles:this.rpcReconciles,wsUpdates:this.wsUpdates,
+   discoveryStats:{...this.discoveryStats},
    localEvaluations:this.localEvaluations,lastDiscoveryAt:this.lastDiscoveryAt,
    lastReconcileAt:this.lastReconcileAt,errors:[...this.errors]};
  }
@@ -132,12 +135,16 @@ export class C3GraphMonitor{
  private evaluate(){
   const at=Date.now();
   const pools=[...this.nodes.values()].map(p=>this.extract(p,at)).filter((p):p is GraphPool=>p!==null);
-  this.evaluation=evaluateGraphCycles(pools,{
+  const scanned=evaluateGraphCycles(pools,{
    sizesUsd:this.options.sizesUsd,maxAgeMs:this.options.maxQuoteAgeMs,
    maxGapMs:this.options.maxQuoteGapMs,maxSlotSkew:this.options.maxSlotSkew,
    minLiquidityUsd:this.options.minLiquidityUsd,maxPathChecks:this.options.maxPathChecks,
    maxResults:this.options.maxResults,assumedCostUsd:this.options.assumedCostUsd
   },at);
+  // Pools blocked by missing/stale components never reach evaluateGraphCycles.
+  // Include them in coverage instead of misleadingly claiming zero stale pools.
+  this.evaluation={...scanned,poolCount:this.nodes.size,
+   stalePools:scanned.stalePools+Math.max(0,this.nodes.size-pools.length)};
   this.localEvaluations++;
  }
  private detach(pool:string){
@@ -210,6 +217,7 @@ export class C3GraphMonitor{
     this.status='partial_error';return;
    }
    const entries=[...unique.values()];
+   this.discoveryStats={apiCandidates:entries.length,validatedV4:0,selected:0};
    type Verified={candidate:Candidate;info:AccountInfo<Buffer>;slot:number};
    const validated=new Map<string,Verified>();
    for(let start=0;start<entries.length;start+=75){
@@ -235,6 +243,7 @@ export class C3GraphMonitor{
      }catch{/* reject disabled or differently encoded pool states */}
     });
    }
+   this.discoveryStats.validatedV4=validated.size;
    const perPair=buckets.map(bucket=>bucket.flatMap(x=>{
     const result=validated.get(x.address);
     return result?[result]:[];
@@ -250,6 +259,7 @@ export class C3GraphMonitor{
     }
     if(picked.length>=this.options.maxPools)break;
    }
+   this.discoveryStats.selected=picked.length;
    if(!picked.length){
     this.note('No supported AMM V4 accounts found among '+entries.length+
      ' public Raydium pair candidates; CPMM/CLMM pools require separate quote adapters');
