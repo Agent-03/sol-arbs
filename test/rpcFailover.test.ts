@@ -4,7 +4,7 @@ import {RpcProviderPool} from '../src/rpcFailover.js';
 
 const primary='https://primary.invalid/rpc?api-key=secret-test-primary';
 const secondary='https://secondary.invalid/v2/secret-test-secondary';
-const opts={minSpacingMs:0,maxRetries:1,initialBackoffMs:40,maxBackoffMs:40};
+const opts={minSpacingMs:0,maxRetries:1,initialBackoffMs:1000,maxBackoffMs:1000};
 const ok=()=>new Response('{"jsonrpc":"2.0","result":{"value":[]}}',{status:200});
 
 test('healthy primary serves requests without touching secondary',async()=>{
@@ -108,4 +108,25 @@ test('single-provider mode preserves existing 429 retries',async()=>{
  assert.equal((await rpc.fetch(primary)).status,200);
  assert.equal(calls,2);
  assert.equal(rpc.snapshot().mode,'single');
+});
+
+test('secondary does not receive credentials from primary authorization headers',async()=>{
+ const seen:{url:string;headers:Headers}[]=[];
+ const transport=(async(input:Parameters<typeof fetch>[0],init?:RequestInit)=>{
+  seen.push({url:String(input),headers:new Headers(init?.headers)});
+  return String(input)===primary?new Response('rate limited',{status:429}):ok();
+ }) as typeof fetch;
+ const rpc=new RpcProviderPool(primary,secondary,opts,transport);
+ const resp=await rpc.fetch(primary,{method:'POST',body:'{}',headers:{
+  'Authorization':'Bearer primary-secret',
+  'x-api-key':'header-primary-secret',
+  'Content-Type':'application/json'
+ }});
+ assert.equal(resp.status,200);
+ assert.equal(seen.length,2);
+ assert.equal(seen[0].headers.get('authorization'),'Bearer primary-secret');
+ assert.equal(seen[1].url,secondary);
+ assert.equal(seen[1].headers.get('authorization'),null);
+ assert.equal(seen[1].headers.get('x-api-key'),null);
+ assert.equal(seen[1].headers.get('content-type'),'application/json');
 });
