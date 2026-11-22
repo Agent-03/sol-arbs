@@ -25,6 +25,8 @@ export type OrcaStatus={status:'idle'|'scanning'|'ok'|'partial_error';lastUpdate
  freshLegs?:number;expiredLegs?:number;
  poolFreshness?:Array<{pool:string;refreshing:boolean;lastCompletedAt?:string;legs:number}>;
  tickArraysSlotVerified?:false;
+ quoteMode?:'fast'|'full';lastScanDurationMs?:number;lastFirstBuyDelayMs?:number;
+ lastBuyCount?:number;lastReverseCount?:number;lastPoolSetupMs?:number;
  progress?:{totalPools:number;completedPools:number;quotesCompleted:number;routesEstimated:number;currentPool?:string;currentSizeUsd?:number};};
 
 export function evaluateRoute(
@@ -72,7 +74,8 @@ export class OrcaMonitor{
    private readonly assumedCostUsd:number,private readonly intervalMs=60000,private readonly minLiquidityUsd=0,
    private readonly onLeg?:()=>void,
    private readonly maxQuoteAgeMs=15000,
-   private readonly getExtraBuys?:()=>Array<{pool:string;inputRaw:string;outputRaw:string;observedAt:string;slot:number|null}>){
+   private readonly getExtraBuys?:()=>Array<{pool:string;inputRaw:string;outputRaw:string;observedAt:string;slot:number|null}>,
+   private readonly quoteMode:'fast'|'full'='fast'){
   // Ephemeral, unused local signing identity required by legacy SDK provider.
   // This service NEVER signs or broadcasts transactions.
   const provider=new AnchorProvider(connection,new Wallet(Keypair.generate()),{commitment:'confirmed'});
@@ -81,7 +84,7 @@ export class OrcaMonitor{
  }
  snapshot():OrcaStatus{
   const b=this.book.snapshot(Date.now(),this.maxQuoteAgeMs);
-  return {...this.state,quotedLegs:b.entries,quoteState:this.state.status==='scanning'?'refreshing':b.quoteState,
+  return {...this.state,quoteMode:this.quoteMode,quotedLegs:b.entries,quoteState:this.state.status==='scanning'?'refreshing':b.quoteState,
    freshLegs:b.freshLegs,expiredLegs:b.expiredLegs,poolFreshness:b.poolStatus,
    tickArraysSlotVerified:false,routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};
  }
@@ -125,16 +128,18 @@ export class OrcaMonitor{
    return;
   }
   this.busy=true;
+  const startedAt=Date.now();
+  let firstBuyAt=0,buyCount=0,reverseCount=0,poolSetupMs=0;
   const allOrca=this.pools.filter(p=>(p.venue==='orca'||p.venue==='manual')&&p.owner===ORCA_WHIRLPOOL && (p.liquidityUsd===undefined||p.liquidityUsd>=this.minLiquidityUsd));
   const orca=onlyPools?allOrca.filter(p=>onlyPools.has(p.address)):allOrca;
   this.state={...this.state,status:'scanning',progress:{totalPools:orca.length,completedPools:0,quotesCompleted:0,routesEstimated:0}};
   const legs:OrcaQuote[]=[],candidates:ArbitrageCandidate[]=[],errors:string[]=[];
   try{
-   const rayQuotes=this.getRaydiumQuotes();
+   const rayQuotes=this.quoteMode==='full'?this.getRaydiumQuotes():[];
    if(!rayQuotes.length)errors.push('No Raydium AMM v4 quotes available. Check /amm-v4 status and errors; cannot create cross-DEX routes.');
    const bySize=new Map<number,AmmV4Quote[]>();
    for(const q of rayQuotes){const size=Number(BigInt(q.inputRaw))/1e6;bySize.set(size,[...(bySize.get(size)??[]),q]);}
-   const extraBuys=this.getExtraBuys?.()??[];
+   const extraBuys=this.quoteMode==='full'?(this.getExtraBuys?.()??[]):[];
    const extraBySize=new Map<number,typeof extraBuys>();
    for(const q of extraBuys){
     const size=Number(BigInt(q.inputRaw))/1e6;
@@ -145,7 +150,12 @@ export class OrcaMonitor{
     if(this.rateLimitedUntil>Date.now())break;
     this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address}};
     let prepared: {pool:Whirlpool;poolSlot:number;observedAt:string};
-    try{prepared=await this.preparePool(pool.address);this.book.begin(pool.address);}
+    try{
+     const prepStartedAt=Date.now();
+     prepared=await this.preparePool(pool.address);
+     poolSetupMs+=Date.now()-prepStartedAt;
+     this.book.begin(pool.address);
+    }
     catch(e){this.addError(errors,`Orca pool ${pool.address}`,e);completed++;if(this.rateLimitedUntil>Date.now())break;continue;}
     let buyTicksRefreshed=false;
     let sellTicksRefreshed=false;
@@ -154,7 +164,10 @@ export class OrcaMonitor{
      this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address,currentSizeUsd:size}};
      const amount=BigInt(Math.round(size*1e6));
      try{
-      const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;legs.push(buy);this.publishLegs(buy);
+      const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;
+      buyCount++;
+      if(!firstBuyAt)firstBuyAt=Date.now();
+      legs.push(buy);this.publishLegs(buy);
       // Buy Orca, sell Raydium using each known Raydium pool's USDC-side output reserve.
       for(const ray of bySize.get(size)??[]){
        try{
@@ -165,10 +178,11 @@ export class OrcaMonitor{
         candidates.push(this.annotateLiquidity(candidate));
        }catch(e){this.addError(errors,`Orca->Raydium ${pool.address}/${ray.pool}`,e);}
       }
+      if(this.quoteMode==='full'){
       // Buy Raydium, sell Orca at EXACT amount produced by first leg.
       for(const ray of bySize.get(size)??[]){
        try{
-        const sell=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'SOL_TO_USDC',BigInt(ray.outputRaw),!sellTicksRefreshed);sellTicksRefreshed=true;legs.push(sell);this.publishLegs(sell);
+        const sell=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'SOL_TO_USDC',BigInt(ray.outputRaw),!sellTicksRefreshed);sellTicksRefreshed=true;reverseCount++;legs.push(sell);this.publishLegs(sell);
         candidates.push(this.annotateLiquidity(evaluateRoute(size,
          {pool:ray.pool,venue:'raydium',inputRaw:ray.inputRaw,outputRaw:ray.outputRaw,observedAt:ray.observedAt,slot:ray.vaultSlot},
          {pool:pool.address,venue:'orca',inputRaw:sell.inputRaw,outputRaw:sell.outputRaw,observedAt:sell.observedAt,slot:sell.poolSlot},
@@ -181,13 +195,14 @@ export class OrcaMonitor{
        try{
         const reverse=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,
          'SOL_TO_USDC',BigInt(clmm.outputRaw),!sellTicksRefreshed);
-        sellTicksRefreshed=true;legs.push(reverse);this.publishLegs(reverse);
+        sellTicksRefreshed=true;reverseCount++;legs.push(reverse);this.publishLegs(reverse);
         candidates.push(this.annotateLiquidity(evaluateRoute(size,
          {pool:clmm.pool,venue:'raydium',inputRaw:clmm.inputRaw,outputRaw:clmm.outputRaw,
           observedAt:clmm.observedAt,slot:clmm.slot},
          {pool:pool.address,venue:'orca',inputRaw:reverse.inputRaw,outputRaw:reverse.outputRaw,
           observedAt:reverse.observedAt,slot:reverse.poolSlot},this.assumedCostUsd)));
        }catch(e){this.addError(errors,'CLMM->Orca '+clmm.pool+'/'+pool.address,e);}
+      }
       }
      }catch(e){this.addError(errors,`${pool.address} ${size}`,e);}
      this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address,currentSizeUsd:size}};
@@ -200,7 +215,11 @@ export class OrcaMonitor{
    this.book.retain(new Set(allOrca.map(p=>p.address)));
    for(const pool of orca)this.book.fail(pool.address);
    this.state={status:errors.length?'partial_error':'ok',lastUpdatedAt:new Date().toISOString(),
-    quotedLegs:this.book.snapshot(Date.now(),this.maxQuoteAgeMs).entries,routeCandidates:candidates,errors,orcaPools:allOrca.length,progress:{totalPools:orca.length,completedPools:orca.length,quotesCompleted:legs.length,routesEstimated:candidates.length}};
+    quotedLegs:this.book.snapshot(Date.now(),this.maxQuoteAgeMs).entries,routeCandidates:candidates,
+    quoteMode:this.quoteMode,lastScanDurationMs:Date.now()-startedAt,
+    lastFirstBuyDelayMs:firstBuyAt?firstBuyAt-startedAt:undefined,
+    lastBuyCount:buyCount,lastReverseCount:reverseCount,lastPoolSetupMs:poolSetupMs,
+    errors,orcaPools:allOrca.length,progress:{totalPools:orca.length,completedPools:orca.length,quotesCompleted:legs.length,routesEstimated:candidates.length}};
   }
  }
  start(){if(this.running)return;this.running=true;const loop=async()=>{if(!this.running)return;try{await this.scanOnce();}catch(e){this.state={...this.state,status:'partial_error',errors:[String(e)]};}if(this.running)this.timer=setTimeout(()=>{void loop();},this.intervalMs);};void loop();}
