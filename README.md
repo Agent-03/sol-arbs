@@ -422,3 +422,49 @@ npm.cmd run dev
 ```
 
 Open the new explorer at `http://127.0.0.1:8787/` and the original diagnostics at `http://127.0.0.1:8787/terminal`. A complete local TypeScript build and live browser run still need to be verified on the workstation.
+
+
+## Phase C1 — shared, slot-aware account cache (read-only)
+
+C1 is the **market-data foundation** for the price-map architecture reviewed in the public Rust reference project. It does **not** copy that project's proprietary code and does **not** implement transaction execution.
+
+### What changed
+
+- A new `src/marketData.ts` owns the normalized per-account cache. Each observation retains its **slot**, first receipt time, last RPC verification time, source (`websocket`, `rpc_poll`, `rpc_reconcile`, `rpc_bootstrap`, future `geyser`), owner program, account bytes, and hash. The byte payload stays on the server, not in JSON dashboards.
+- **Shared WebSocket watches:** A single `onAccountChange` subscription per unique account address, with reference-counted readers. The pool scanner and Raydium AMM V4 monitor now share those subscriptions instead of maintaining duplicate listeners.
+- **Dependency graph:** Every discovered pool is initially tied to its pool-state account. Quote-supported Raydium AMM V4 pools add their two vault accounts. A vault notification only invalidates/recalculates affected pools, without a new HTTP request on that event's hot path. Orca and CLMM pool account notifications still schedule throttled SDK/RPC refreshes; CLMM now has a coalesced per-pool refresh queue.
+- **Data integrity:** Older-slot updates never replace a newer observation. Duplicate RPC reads at the same slot can update `verifiedAt` but **cannot reset `receivedAt`** or make a stale quote appear fresh. Equal-slot RPC responses cannot overwrite distinct WS/Geyser payloads. Owner mismatches fail closed, and old accounts are evicted as pool universes rotate.
+- **Metrics:** `GET /api/market-data` returns watched accounts, actual updates by source, duplicate/older-slot/owner-mismatch drops, per-pool dependency coverage, missing/stale/slot-skew states, and latest WebSocket event time. The same data is exposed in `GET /api/dashboard` as `c1` and in `GET /api/explorer` as `summary.c1`. Both existing UIs show a compact live feed-health section.
+- **Testing:** `test/marketData.test.ts` covers watch deduplication, dependency fan-out, owner/slot validation, stale age, RPC bootstrap, and quote-age integrity. `test/c1LiveRaydium.test.ts` checks that Raydium and the pool watcher share one subscription and a live vault update triggers quote recalculation without new RPC requests.
+
+### What C1 does *not* solve yet
+
+The configured source remains **Solana WebSocket account change events** using `SOLANA_WS_URL`. The `geyser` source label is reserved for a *future normalized adapter*; a Yellowstone Geyser connection, gRPC credentials and a streaming decoder have **not** been added.
+
+**Orca Whirlpool tick arrays and Raydium CLMM tick arrays still use their existing SDK/RPC loaders.** A "cache-ready" Orca or CLMM pool in C1 means its *registered pool-state dependency* is present and time/slot aligned; it does **not** certify that its tick arrays are synchronized, its quote is current or an arbitrage route can execute. C2 must add locally priced, independently validated tick/bin-array snapshots before those SDK calls can be removed from the quote path.
+
+The existing RPC failover, quote status labels, cost assumptions, and no-wallet/no-execution protections remain in place. C1 does not guarantee positive opportunities, lower end-to-end chain latency, or better landing success.
+
+### Run and check on Windows
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Then open `http://127.0.0.1:8787/` (Activity Explorer) or `http://127.0.0.1:8787/terminal` (technical dashboard). In a separate PowerShell window:
+
+```powershell
+$m = Invoke-RestMethod http://127.0.0.1:8787/api/market-data
+$m | Select-Object watchedAccounts,trackedAccounts,wsUpdates,rpcUpdates,readyPools,stalePools,missingDependencies,slotSkewPools,olderSlotDrops | Format-List
+$m.pools | Select-Object pool,accounts,present,state,oldestAgeMs,slotSkew | Format-Table -AutoSize
+
+$d = Invoke-RestMethod http://127.0.0.1:8787/api/dashboard
+$d.clmm | Select-Object poolAccountEvents,selectiveScans,pendingDirtyPools
+$d.opportunities | Select-Object total,comparable,excluded,positive,bestComparableNetUsd
+```
+
+**Validation status:** The repository changes and fixture tests are committed. The complete TypeScript build, unit suite, Solana WebSocket reconnect behavior, SDK compatibility and live RPC throughput must be verified on the machine running the service. If a build or test fails, capture the output rather than treating the changes as production-ready.
