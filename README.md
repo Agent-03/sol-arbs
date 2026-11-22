@@ -361,3 +361,37 @@ $d.orca | Select-Object status,quoteState,freshLegs,expiredLegs | Format-List
 ```
 
 **Validation note:** Source, test fixtures and dashboard JavaScript have been updated. The complete dependency install, TypeScript build, unit suite and live mainnet feed must still be verified on the target Windows workstation. In particular, the Raydium SDK integration is new and may need follow-up compatibility fixes from your local build output. No performance or profitability claims are implied by compilation or connectivity.
+
+
+## B5.2 — shorten the failing 29–40 second Orca scan (diagnostic mode)
+
+The user's 18-sample field test showed 29–40 second Orca refreshes, only 0–2 brief fresh legs, and **zero freshness-qualified routes** despite 2–6 raw estimates. The bottleneck is the number of *sequential* reverse-quote requests, not the 2ms local evaluator.
+
+A new **`B5_2_ORCA_QUOTE_MODE=fast`** mode (default) deliberately limits the scanner to the **smallest single size** in `B5_QUOTE_SIZES_USD` and makes only the first Orca USDC→SOL buy quote per eligible pool/size; its Raydium AMM V4 / CLMM SOL→USDC second leg is recomputed in memory. **It does not monitor Raydium→Orca reverse arbitrage**. The dashboard and `/api/dashboard` show this loss of scope explicitly, and the theoretical coverage denominator counts one, not two directions.
+
+The first fresh Orca buy also requests a **throttled (12 seconds minimum)** coherent-context Raydium AMM V4 account reconciliation, so a still-valid but infrequently changing Raydium pool can be revalidated near the incoming Orca observation. This still uses the shared RPC limiter; it does not fake a newer observation timestamp or make quotes atomic. Test this mode to determine whether the remaining stale comparisons come from provider contention, slot skew or market-data design.
+
+Set `B5_2_ORCA_QUOTE_MODE=full` to restore both directions, all configured trade sizes, and exact-input Orca reverse SDK quotes. This is more complete but slower, and was previously observed taking 29–40 seconds per cycle on the user's shared rate-limited RPC plan. Neither mode sends orders.
+
+New metrics: `b5.quoteMode`, `b5.activeSizesUsd`, `b5.monitoredDirections`, `b5.requestedRaydiumSyncReads`, `b5.scanTiming` and `orca.lastFirstBuyDelayMs`, `orca.lastScanDurationMs`, `orca.lastBuyCount`, `orca.lastReverseCount`.
+
+Try the default fast mode first; keep the original B4 freshness filters unchanged:
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+In a second PowerShell window:
+
+```powershell
+$d = Invoke-RestMethod http://127.0.0.1:8787/api/dashboard
+$d.b5 | Select-Object quoteMode,activeSizesUsd,scanTiming,requestedRaydiumSyncReads
+$d.opportunities | Select-Object total,comparable,excluded,positive,bestComparableNetUsd
+$d.opportunities.excludedByReason | ConvertTo-Json
+```
+
+**Do not claim this fixes profitability:** even freshly aligned quotes can still be negative net; same-slot coherent Orca tick-array updates, fee estimation and transaction simulation remain unimplemented. The primary goal is to reduce quote acquisition time and get reproducible, sufficiently synchronized research comparisons before broadening execution capability.
