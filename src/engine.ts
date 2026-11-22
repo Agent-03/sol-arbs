@@ -44,6 +44,7 @@ export class MarketEngine {
  private discoveryRemoved=0;
  private discoveryRuns=1;
  private lastManualScanAt=0;
+ private lastC2ValidationAt=0;
  private lastManualDiscoveryAt=0;
  private events:Activity[]=[];
  private histories:History[]=[];
@@ -255,6 +256,17 @@ export class MarketEngine {
   this.schedule(100);
   return {accepted:true,message:'Orca SDK refresh requested; Raydium continues responding to live events'};
  }
+ requestC2Validation():{accepted:boolean;message:string}{
+  if(!this.running||this.busy!=='idle')
+   return {accepted:false,message:'Engine is not idle'};
+  const remaining=60000-(Date.now()-this.lastC2ValidationAt);
+  if(remaining>0)return {accepted:false,message:'Reference validation cooldown: '+Math.ceil(remaining/1000)+'s'};
+  this.lastC2ValidationAt=Date.now();
+  void this.orca.validateReferenceOnce().then(result=>{
+   this.note(result.accepted?'info':'warning','c2_reference',result.message);
+  }).catch(error=>this.note('warning','c2_reference','SDK cross-check failed: '+String(error)));
+  return {accepted:true,message:'Read-only one-pool SDK comparison requested; see /api/c2 for outcome'};
+ }
  requestDiscovery():{accepted:boolean;message:string}{
   if(!this.running)return {accepted:false,message:'Engine not started'};
   if(this.busy!=='idle')return {accepted:false,message:'A quote refresh or discovery is running'};
@@ -460,14 +472,19 @@ export class MarketEngine {
     lastUpdatedAt:r.lastUpdatedAt,errors:[...r.errors,...Object.entries(r.poolReasons).map(([key,value])=>key+': '+value)].slice(0,6)},
    clmm:{status:cl.status,selectedPools:cl.selectedPools,readyPools:cl.readyPools,
     quotes:cl.quotes.length,scans:cl.scans,perPool:cl.perPool,
+    localEvents:cl.localEvents,localRecomputations:cl.localRecomputations,
+    activeTickSubscriptions:cl.activeTickSubscriptions,slotVerifiedPools:cl.slotVerifiedPools,
     poolAccountEvents:cl.poolAccountEvents,selectiveScans:cl.selectiveScans,
     pendingDirtyPools:cl.pendingDirtyPools,
     lastUpdatedAt:cl.lastUpdatedAt,errors:cl.errors.slice(0,6)},
    c2:{
     orcaLocal:o.localPricing??null,
+    referenceValidation:o.referenceValidation??null,
     clmmLocal:{scans:cl.scans,quotesFromCachedSdkState:cl.quotes.length,
-     tickArraySlotsCoherent:false},
-    note:'Only fully cached Whirlpool states are priced without RPC. CLMM still needs RPC for tick-array snapshots; all results remain indicative.'
+     localEvents:cl.localEvents??0,localRecomputations:cl.localRecomputations??0,
+     activeTickSubscriptions:cl.activeTickSubscriptions??0,
+     slotVerifiedPools:cl.slotVerifiedPools??0},
+    note:'Offline quotes use SDK mathematics from cached pool/tick state; reference comparisons use separate SDK/RPC contexts and are not execution proofs.'
    },
    orca:{status:o.status,poolCount:o.orcaPools,quotedLegs:o.quotedLegs.length,
     quoteState:o.quoteState,freshLegs:o.freshLegs,expiredLegs:o.expiredLegs,
