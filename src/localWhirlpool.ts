@@ -22,12 +22,49 @@ export type LocalQuote={
  tickArraySlot:number;computedAt:string;
  quoteModel:'orca_whirlpool_sdk_in_memory';
 };
+export type LocalQuoteFailure={
+ pool:string;direction:Direction;inputRaw:string;reason:string;firstAt:string;lastAt:string;
+ skipCount:number;componentKey:string;
+};
+/** Pure failure gate: cache a rejected exact-input quote only for the
+ * component state which produced the failure. A new pool or tick-array
+ * hash/slot automatically re-enables computation.
+ */
+export class QuoteFailureGate{
+ private rows=new Map<string,LocalQuoteFailure>();
+ private skipped=0;
+ private key(pool:string,direction:Direction,inputRaw:bigint){return pool+':'+direction+':'+inputRaw;}
+ blocked(pool:string,direction:Direction,inputRaw:bigint,componentKey:string){
+  const id=this.key(pool,direction,inputRaw),f=this.rows.get(id);
+  if(!f||f.componentKey!==componentKey)return false;
+  f.skipCount++;f.lastAt=new Date().toISOString();this.skipped++;return true;
+ }
+ reject(pool:string,direction:Direction,inputRaw:bigint,componentKey:string,reason:string){
+  const id=this.key(pool,direction,inputRaw),now=new Date().toISOString();
+  const prior=this.rows.get(id);
+  if(prior?.componentKey===componentKey)return false;
+  this.rows.set(id,{pool,direction,inputRaw:inputRaw.toString(),componentKey,reason,
+   firstAt:now,lastAt:now,skipCount:0});
+  return true;
+ }
+ recover(pool:string,direction:Direction,inputRaw:bigint){
+  this.rows.delete(this.key(pool,direction,inputRaw));
+ }
+ clearPool(pool:string){
+  for(const [key,row] of this.rows)if(row.pool===pool)this.rows.delete(key);
+ }
+ get(pool:string,direction:Direction,inputRaw:bigint){return this.rows.get(this.key(pool,direction,inputRaw));}
+ summary(){return {activeFailures:this.rows.size,skippedRecalculations:this.skipped,
+  failures:[...this.rows.values()].map(f=>({...f,componentKey:undefined}))};}
+}
 export type LocalPricingHealth={
  trackedPools:number;readyPools:number;preparedPools:number;
  bootstrapReads:number;localCalculations:number;localErrors:number;
  unsupportedPools:number;lastLocalAt?:string;
  validatedAgainstSdk:number;validationMismatches:number;
  verifiedUninitializedTickArrays:number;
+ activeUnquotableSizes:number;skippedUnquotableRecomputations:number;
+ unquotableQuotes:Array<Omit<LocalQuoteFailure,'componentKey'>>;
  errors:string[];
 };
 
@@ -67,6 +104,7 @@ export class LocalWhirlpoolQuoter{
  private verifiedUninitializedTickArrays=0;
  private unsub?:()=>void;
  private lastErrorReason=new Map<string,string>();
+ private readonly failureGate=new QuoteFailureGate();
  constructor(
   private readonly feed:MarketDataFeed,
   private readonly programId:PublicKey,
@@ -210,6 +248,13 @@ export class LocalWhirlpoolQuoter{
   }
   const valid=validateLocalComponents(observations,now,this.maxAgeMs,this.maxSlotSkew);
   if(!valid.ok){this.lastErrorReason.set(pool,valid.reason??'invalid');return null;}
+  const componentKey=[decoded.observation.hash,decoded.observation.slot,
+   ...required.map(({address})=>{
+    const state=this.feed.get(address);
+    const absent=this.feed.getVerifiedAbsent(address);
+    return state?state.hash+':'+state.slot:absent?'absent:'+absent.slot:'unknown';
+   })].join('|');
+  if(this.failureGate.blocked(pool,direction,inputRaw,componentKey))return null;
   try{
    const result=swapQuoteWithParams({
     whirlpoolData:decoded.data,tokenAmount:new BN(inputRaw.toString()),
@@ -222,13 +267,37 @@ export class LocalWhirlpoolQuoter{
    this.localCalculations++;this.lastLocalAt=new Date(now).toISOString();
    this.verifiedUninitializedTickArrays+=tickArrays.filter(q=>q.data===null).length;
    this.lastErrorReason.delete(pool);
+   this.failureGate.recover(pool,direction,inputRaw);
    const tickAt=Math.min(...observations.slice(1).map(x=>x.receivedAt));
    return {pool,direction,inputRaw:inputRaw.toString(),
     outputRaw:result.estimatedAmountOut.toString(),feeRaw:result.estimatedFeeAmount.toString(),
     observedAt:new Date(valid.oldestAt).toISOString(),poolSlot:decoded.observation.slot,
     tickArraysObservedAt:new Date(tickAt).toISOString(),tickArraySlot:valid.minSlot,
     computedAt:new Date(now).toISOString(),quoteModel:'orca_whirlpool_sdk_in_memory'};
-  }catch(error){this.lastErrorReason.set(pool,String(error));this.error('Local Whirlpool '+pool+': '+String(error));return null;}
+  }catch(error){
+   const raw=String(error);
+   const normalized=/traversed too many arrays|out of bounds at attempt to traverse tick index|TickArrayCrossingAboveMax/i.test(raw)
+    ?'insufficient_tick_array_traversal_for_input'
+    :raw;
+   this.lastErrorReason.set(pool,normalized);
+   if(this.failureGate.reject(pool,direction,inputRaw,componentKey,normalized))
+    this.error('Local Whirlpool '+pool+' '+direction+' input='+inputRaw+': '+normalized);
+   return null;
+  }
+ }
+ isKnownUnquotable(pool:string,direction:Direction,inputRaw:bigint):boolean{
+  const failure=this.failureGate.get(pool,direction,inputRaw);
+  if(!failure)return false;
+  const decoded=this.decodePool(pool);
+  if(!decoded)return false;
+  const required=this.tickKeys(pool,decoded.data,
+   direction==='USDC_TO_SOL'?decoded.data.tokenMintA.toBase58()===USDC_MINT:
+    decoded.data.tokenMintA.toBase58()===SOL_MINT);
+  const fingerprint=[decoded.observation.hash,decoded.observation.slot,...required.map(({address})=>{
+   const state=this.feed.get(address),absent=this.feed.getVerifiedAbsent(address);
+   return state?state.hash+':'+state.slot:absent?'absent:'+absent.slot:'unknown';
+  })].join('|');
+  return fingerprint===failure.componentKey;
  }
  hasReadySnapshot(pool:string,now=Date.now()):boolean{
   const layout=this.layouts.get(pool),decoded=this.decodePool(pool);
@@ -254,6 +323,12 @@ export class LocalWhirlpoolQuoter{
    lastLocalAt:this.lastLocalAt,validatedAgainstSdk:this.validatedAgainstSdk,
    validationMismatches:this.validationMismatches,
    verifiedUninitializedTickArrays:this.verifiedUninitializedTickArrays,
+   activeUnquotableSizes:this.failureGate.summary().activeFailures,
+   skippedUnquotableRecomputations:this.failureGate.summary().skippedRecalculations,
+   unquotableQuotes:this.failureGate.summary().failures.map(f=>({
+    pool:f.pool,direction:f.direction,inputRaw:f.inputRaw,reason:f.reason,
+    firstAt:f.firstAt,lastAt:f.lastAt,skipCount:f.skipCount
+   })),
    errors:[...this.errors,...[...this.lastErrorReason.entries()].slice(0,3).map(([pool,reason])=>pool+': '+reason)].slice(0,10)};
  }
  forget(pool:string){
@@ -262,6 +337,7 @@ export class LocalWhirlpoolQuoter{
   layout.release.forEach(release=>release());
   this.layouts.delete(pool);
   this.lastErrorReason.delete(pool);
+  this.failureGate.clearPool(pool);
   this.feed.setDependencies(pool,[pool]);
  }
  stop(){
