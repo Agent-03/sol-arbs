@@ -56,7 +56,7 @@ async function main(){
     const s=scanner.snapshot(),d=dashboard();
     send(s.status==='healthy'?200:503,{status:s.status,lastPollAt:s.lastPollAt,errors:s.errors,
      trackedPools:s.pools.length,stalePools:s.pools.filter(p=>p.stale).length,
-     scan:d.scan,opportunities:{comparable:d.opportunities.comparable,positive:d.opportunities.positive},
+     scan:d.scan,b5:d.b5,opportunities:{comparable:d.opportunities.comparable,positive:d.opportunities.positive},
      rpc:rpcLimiter.snapshot(),executableRoutes:0});
     return;
    }
@@ -73,7 +73,7 @@ async function main(){
    }
    if(path==='/arb'){
     const d=dashboard(),o=d.opportunities;
-    send(200,{phase:'B4',status:d.status,updatedAt:d.now,
+    send(200,{phase:'B5',status:d.status,updatedAt:d.now,b5:d.b5,
      indicativeRoutes:o.total,comparableRoutes:o.comparable,excludedRoutes:o.excluded,
      positiveComparable:o.positive,bestComparableNetUsd:o.bestComparableNetUsd,
      executableRoutes:0,raydiumQuoteStatus:d.raydium.status,raydiumQuoteCount:d.raydium.quotes,
@@ -81,7 +81,7 @@ async function main(){
      freshnessRules:o.rules,excludedByReason:o.excludedByReason,
      candidates:[...o.comparableRoutes,...o.excludedRoutes],
      rpc:d.rpc,
-     warning:'Freshness-qualified only for research. Independent, non-atomic quotes. Execution and landing costs remain unverified.'});
+     warning:'B5 read-only research: Raydium event-local state; Orca SDK/RPC state may lag. No atomic execution, simulation or validated landing costs.'});
     return;
    }
    if(path==='/routes'){
