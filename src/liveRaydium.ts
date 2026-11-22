@@ -139,9 +139,16 @@ export class LiveRaydiumMonitor{
    const state:AmmV4State=decodeAmmV4(pool.address,primary.data);
    const baseAmount=decodeVault(base.data,state.baseMint,AMM_AUTHORITY);
    const quoteAmount=decodeVault(quote.data,state.quoteMint,AMM_AUTHORITY);
-   const next:AmmV4Quote[]=this.sizesUsd.map(size=>quoteV4(
-    state,baseAmount,quoteAmount,BigInt(Math.round(size*1e6)),
-    primary.slot,Math.min(base.slot,quote.slot)));
+   // Use the OLDEST component receipt time, not the latest callback time.
+   // Recomputing after one vault changes must never make other cached
+   // components appear fresher than they really are.
+   const oldestReceivedAt=new Date(Math.min(
+    primary.receivedAt,base.receivedAt,quote.receivedAt)).toISOString();
+   const next:AmmV4Quote[]=this.sizesUsd.map(size=>({
+    ...quoteV4(state,baseAmount,quoteAmount,BigInt(Math.round(size*1e6)),
+     primary.slot,Math.min(base.slot,quote.slot)),
+    observedAt:oldestReceivedAt
+   }));
    this.quotes.set(pool.address,next);
    pool.reason=undefined;
   }catch(error){
