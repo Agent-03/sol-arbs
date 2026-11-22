@@ -3,33 +3,49 @@ import assert from 'node:assert/strict';
 import {Script} from 'node:vm';
 import {explorerHtml} from '../src/explorerDashboard.js';
 
-test('explorer includes a valid browser script',()=>{
+test('C3D radar is valid HTML with parseable inline JavaScript',()=>{
+ assert.match(explorerHtml,/<!doctype html>/i);
  const match=explorerHtml.match(/<script>([\s\S]*?)<\/script>/);
- assert.ok(match,'explorer must have a script');
- assert.doesNotThrow(()=>new Script(match[1],{filename:'solarb-explorer.js'}));
-});
-test('explorer retains the screenshot-inspired live table interactions',()=>{
- const expected=[
-  'Route Estimates','Swap Quotes','Pool Coverage','Engine Activity',
-  'Transactions','data-tab="routes"','data-tab="transactions"',
-  'id="query"','id="filter"','id="size"','id="csv"',
-  'id="pagination"','data-sort','/api/explorer','/terminal',
-  'id="c1watched"','id="c1updates"','id="c1ready"','/api/market-data','id="c2orca"','id="c2clmm"','id="c2checks"','id="validate"','/api/actions/validate',
-  'On-chain Evidence','data-tab="chain"','id="samplechain"','/api/actions/c3-analyze','/api/c3',
-  'Multi-hop Radar','data-tab="graph"','id="graphTwo"','id="graphThree"','id="graphPositive"','/api/c3/graph'
- ];
- for(const term of expected)assert.ok(explorerHtml.includes(term),'missing '+term);
-});
-test('explorer clearly distinguishes simulated quotes from real Solana transactions',()=>{
- assert.match(explorerHtml,/not executed transactions/i);
- assert.match(explorerHtml,/No transaction indexer connected/i);
- assert.match(explorerHtml,/No Solana transaction signature/i);
- assert.match(explorerHtml,/No wallet/i);
+ assert.ok(match,'C3D radar must have inline application script');
+ assert.doesNotThrow(()=>new Script(match[1],{filename:'solarb-c3d-dashboard.js'}));
 });
 
-test('C3D explorer labels wSOL multi-hop cycles as indicative and not executable',()=>{
- assert.match(explorerHtml,/2-leg.*3-leg/i);
- assert.ok(explorerHtml.includes('NOT same-slot atomic swaps'));
- assert.ok(explorerHtml.includes('Indicative amount differential · no execution'));
- assert.ok(explorerHtml.includes('Not transaction-simulated'));
+test('root and terminal use the new wSOL-first dashboard, not stale USDC-first labels',()=>{
+ assert.match(explorerHtml,/C3D/);
+ assert.match(explorerHtml,/BASE · wSOL/);
+ assert.match(explorerHtml,/Live wSOL Opportunity Radar/);
+ assert.match(explorerHtml,/wSOL → Token → wSOL/);
+ assert.doesNotMatch(explorerHtml,/>Route Estimates</);
+ assert.doesNotMatch(explorerHtml,/USDC → SOL → USDC route observations/);
+ assert.doesNotMatch(explorerHtml,/SOL \/ USDC<\/span>/);
+});
+
+test('C3D radar displays dynamic tokens, cycle counts, SOL sizes and dual RPC health',()=>{
+ for(const text of [
+  'Token Discovery','Pool Coverage','RPC Network',
+  'id="metricTokens"','id="metricPools"','id="metricEligible"',
+  'id="metricTwo"','id="metricThree"','id="metricRpc"',
+  'id="view-radar"','id="view-tokens"','id="view-coverage"','id="view-network"',
+  'id="routeSearch"','id="routeLegs"','id="routeSort"','id="downloadRoutes"',
+  'id="tokenSearch"','id="tokenCategory"','id="watchlist"',
+  '/api/c3/graph','/api/c3/tokens','/rpc',
+  'c.sizeSol','c.indicativeNetSol','g.baseAsset','t.activeTokens',
+  'r.primaryAssigned','r.secondaryAssigned',
+  'raydium_amm_v4','raydium_cpmm','raydium_clmm','orca_whirlpool'
+ ])assert.ok(explorerHtml.includes(text),'C3D radar missing '+text);
+});
+
+test('C3D radar retains diagnostics, empty states and safe token rendering',()=>{
+ for(const text of [
+  'No current wSOL cycles','No matching tokens',
+  'Pool state warming','SCANNER OFFLINE',
+  'data-view="radar"','data-view="tokens"','data-view="coverage"',
+  '/legacy','Not transaction-simulated',
+  'routeFiltered','copy','function esc'
+ ].filter(x=>x!=='Not transaction-simulated')){
+  assert.ok(explorerHtml.includes(text),'missing '+text);
+ }
+ assert.match(explorerHtml,/NO WALLET \/ NO TRANSACTION EXECUTION/);
+ assert.match(explorerHtml,/USDC may appear inside an actual bridge route/);
+ assert.ok(explorerHtml.includes('encodeURIComponent')===false,'mint addresses must not be used as untrusted URLs');
 });
