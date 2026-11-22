@@ -1042,3 +1042,121 @@ matching and reuse of the already-supported Raydium/Orca quote math.
 It does not yet implement Meteora or PumpSwap swap quoting, atomic
 multi-pool account reads, transaction simulation, or execution.
 All graph cycles remain non-executable research observations.
+
+
+## C3D.4 — Live Meteora DLMM quotes + Orca adaptive-fee recovery
+
+The existing wSOL-rooted C3 graph now accepts **Meteora DLMM
+exact-input SDK quotes** when all required on-chain pool/bin-array
+state is present and fresh. It uses the official published
+`@meteora-ag/dlmm@1.9.14` package (the unpublished GitHub 1.9.15
+manifest is not an npm release). The published CommonJS entry is
+loaded explicitly because its ESM entry has NodeNext/Anchor import
+compatibility issues. This is still the existing C3 scanner, not a
+separate price or opportunity engine.
+
+### Orca readiness repair
+
+Earlier snapshots reported many Whirlpool accounts as
+`tick_arrays_missing_or_snapshot_stale_or_slot_skew` and adaptive-fee
+pools as `Adaptive-fee Whirlpool requires cached oracle state`.
+
+- For **adaptive-fee Whirlpool pools**, the adapter derives the Orca
+  oracle PDA, subscribes to it and verifies the actual Whirlpool-owned
+  oracle bytes. Quotes pass the cached decoded `OracleData` into
+  Orca's official `swapQuoteWithParams`; no zero-oracle substitutes.
+- Pool accounts, required tick-array accounts, and adaptive oracle
+  accounts are RPC-reverified periodically **even when their bytes
+  haven't changed**. The shared cache records the most recent
+  *verification* slot and time separately from the original change
+  slot and time; this avoids rejecting quiet tick arrays merely
+  because an old identical snapshot has an old original notification
+  slot. Distinct bytes cannot be smuggled into the cache through this
+  mechanism.
+- The Pool Coverage diagnostics now expose specific reasons such as
+  `oracle_missing`, `oracle_decode_failed`,
+  `tick_array_missing:<address>`, `component_age`,
+  `slot_skew`, or `tick_array_window_changed`.
+- Required ticks/oracle are still strictly validated for account
+  owner, mint/Whirlpool membership, age and slot alignment before
+  being used for local quotes. Token-2022 pools remain outside the
+  classic-SPL local-quote path.
+
+### Meteora local quote pipeline
+
+1. Reuse mint- and owner-verified DLMM pool addresses from C3D.2.
+2. Initialize the SDK with bounded concurrency and fetch both
+   directions' bin-array windows and bitmap extension when present.
+3. Attach WebSocket watches and shared RPC verification to pool,
+   bin-array and bitmap accounts. Update/rotate array windows when
+   trading shifts into new bins.
+4. Recreate the SDK quote model from the current, verified raw
+   account bytes and call `sdk.swapQuote()` *synchronously* on a
+   graph edge. The SDK handles per-bin integer rounding and dynamic
+   swap fee math. Incomplete array coverage and partial fills return
+   no quote.
+5. Include ready DLMM pools alongside Raydium/Orca in the same
+   `/api/c3/graph` wSOL-rooted two-/three-leg evaluator. Show
+   `dlmm` readiness, failures, refreshed accounts and local quote
+   counts in the existing graph JSON and Pool Coverage UI.
+
+**Still not implemented:** Meteora DAMM v2 and PumpSwap exact-input
+quote adapters. Their previously verified pools remain discoverable
+in `/api/c3/pools` but are not presented as ready graph quote edges.
+No wallet, transaction execution or Jito submission is added.
+
+### Configuration
+
+```dotenv
+C3D4_DLMM_ENABLED=1
+C3D4_DLMM_MAX_POOLS=16
+C3D4_DLMM_CONCURRENCY=3
+C3D4_DLMM_REFRESH_MS=8000
+C3D4_DLMM_MAX_ARRAYS_PER_SIDE=3
+```
+
+These are bounded starting values; keep the existing independent
+`RPC_HTTP_MAX_CONCURRENT`, `RPC_SECONDARY_HTTP_MAX_CONCURRENT`
+and `RPC_DUAL_ACTIVE` options.
+
+### Validate live after pulling main
+
+```powershell
+cd C:\Users\Nodev\Desktop\sol-arbs
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+In a second PowerShell window:
+
+```powershell
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+
+$g.dlmm | Select-Object status,tracked,ready,bootstrapAttempts,bootstrapFailures,localQuotes,quoteFailures,verifiedAccountRefreshes | Format-List
+$g.dlmm.perPool | Select-Object address,pair,status,reason,quoteFailure,binArrays,slotGap | Format-Table -AutoSize
+
+$g.concentrated.orcaPools |
+  Select-Object pair,pool,state,reason |
+  Format-Table -AutoSize
+
+$g | Select-Object baseAsset,trackedPools,eligiblePools,twoLegCycles,
+  threeLegCycles,positiveIndicative,bestIndicativeNetSol | Format-List
+
+$g.candidates |
+  Select-Object -First 20 legs,sizeSol,indicativeNetSol,
+    @{N='Route';E={$_.symbolPath -join ' -> '}},
+    @{N='DEX';E={$_.hops.program -join ' -> '}} |
+  Format-Table -AutoSize
+
+$p = Invoke-RestMethod http://127.0.0.1:8787/api/c3/pools
+$p.perVenue | Format-List
+$p | Select-Object crossDexPairs,potentialTwoLegPairs,readyTwoLegPairs | Format-List
+```
+
+Warm-up involves multiple Solana account reads. A DLMM pool appears
+as quote-ready only after its actual SDK/bin-array snapshot passes
+all readiness checks. Incomplete pool state stays visible in the
+per-pool health report; it is not passed into the graph.
