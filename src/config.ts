@@ -3,7 +3,7 @@ import { PublicKey } from '@solana/web3.js';
 import type {QuoteConfig} from './jupiter.js';
 import type {RpcLimitOptions} from './rpc.js';
 import type {FreshnessRules} from './opportunities.js';
-export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;pools:PublicKey[];maxPools:number;pollIntervalMs:number;staleAfterMs:number;port:number;dataDir:string;ammScanIntervalMs:number;ammMaxSlotSkew:number;orcaScanIntervalMs:number;rpcLimit:RpcLimitOptions;freshness:FreshnessRules;minQuoteLiquidityUsd:number;discoveryRefreshMs:number;noProfitDiscoveryMs:number;b5MaxComponentAgeMs:number;b5ReconcileMs:number;b5OrcaRefreshMs:number;b5OrcaMinTriggerMs:number;b5QuoteSizesUsd:number[];b51ClmmMaxPools:number;b51ClmmRefreshMs:number;b51ClmmMaxCacheAgeMs:number;b52OrcaQuoteMode:'fast'|'full';jupiter:QuoteConfig;};
+export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;pools:PublicKey[];maxPools:number;pollIntervalMs:number;staleAfterMs:number;port:number;dataDir:string;ammScanIntervalMs:number;ammMaxSlotSkew:number;orcaScanIntervalMs:number;rpcLimit:RpcLimitOptions;freshness:FreshnessRules;minQuoteLiquidityUsd:number;discoveryRefreshMs:number;noProfitDiscoveryMs:number;b5MaxComponentAgeMs:number;b5ReconcileMs:number;b5OrcaRefreshMs:number;b5OrcaMinTriggerMs:number;b5QuoteSizesUsd:number[];b51ClmmMaxPools:number;b51ClmmRefreshMs:number;b51ClmmMaxCacheAgeMs:number;b52OrcaQuoteMode:'fast'|'full';c2LocalQuotesEnabled:boolean;jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
 function nonNegativeNumber(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isFinite(n)||n<0)throw new Error(`${key} must be a nonnegative number`);return n;}
@@ -37,6 +37,11 @@ export function loadConfig():Config{
   b51ClmmMaxPools:positiveInteger('B5_1_CLMM_MAX_POOLS',3),
   b51ClmmRefreshMs:positiveInteger('B5_1_CLMM_REFRESH_MS',45000),
   b51ClmmMaxCacheAgeMs:positiveInteger('B5_1_CLMM_MAX_CACHE_AGE_MS',60000),
+  c2LocalQuotesEnabled:(()=>{
+   const value=process.env.C2_LOCAL_QUOTES_ENABLED??'1';
+   if(value!=='0'&&value!=='1')throw new Error('C2_LOCAL_QUOTES_ENABLED must be 0 or 1');
+   return value==='1';
+  })(),
   b52OrcaQuoteMode:(()=>{
    const value=process.env.B5_2_ORCA_QUOTE_MODE??'fast';
    if(value!=='fast'&&value!=='full')throw new Error('B5_2_ORCA_QUOTE_MODE must be fast or full');
