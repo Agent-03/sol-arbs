@@ -31,6 +31,12 @@ export type OrcaStatus={status:'idle'|'scanning'|'ok'|'partial_error';lastUpdate
  quoteMode?:'fast'|'full';lastScanDurationMs?:number;lastFirstBuyDelayMs?:number;
  lastBuyCount?:number;lastReverseCount?:number;lastPoolSetupMs?:number;
  localPricing?:LocalPricingHealth;
+ referenceValidation?:{
+  running:boolean;checks:number;matches:number;mismatches:number;inconclusive:number;
+  last?:{pool:string;status:'match'|'mismatch'|'inconclusive'|'error';localRaw?:string;
+   sdkRaw?:string;deltaRaw?:string;poolSlot?:number;sdkPoolSlot?:number;
+   durationMs:number;checkedAt:string;reason:string};
+ };
  progress?:{totalPools:number;completedPools:number;quotesCompleted:number;routesEstimated:number;currentPool?:string;currentSizeUsd?:number};};
 
 export function evaluateRoute(
@@ -69,6 +75,10 @@ export class OrcaMonitor{
  private readonly client:ReturnType<typeof buildWhirlpoolClient>;
  private readonly ctx:WhirlpoolContext;
  private readonly local?:LocalWhirlpoolQuoter;
+ private validationRunning=false;
+ private referenceChecks=0;private referenceMatches=0;
+ private referenceMismatches=0;private referenceInconclusive=0;
+ private lastReference?:NonNullable<OrcaStatus['referenceValidation']>['last'];
  private annotateLiquidity(candidate:ArbitrageCandidate):ArbitrageCandidate{
   const buy=this.pools.find(p=>p.address===candidate.buyPool);
   const sell=this.pools.find(p=>p.address===candidate.sellPool);
@@ -97,9 +107,60 @@ export class OrcaMonitor{
   const b=this.book.snapshot(Date.now(),this.maxQuoteAgeMs);
   return {...this.state,quoteMode:this.quoteMode,quotedLegs:b.entries,quoteState:this.state.status==='scanning'?'refreshing':b.quoteState,
    freshLegs:b.freshLegs,expiredLegs:b.expiredLegs,poolFreshness:b.poolStatus,
-   tickArraysSlotVerified:false,localPricing:this.local?.snapshot(),routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};
+   tickArraysSlotVerified:false,localPricing:this.local?.snapshot(),
+   referenceValidation:{running:this.validationRunning,checks:this.referenceChecks,
+    matches:this.referenceMatches,mismatches:this.referenceMismatches,
+    inconclusive:this.referenceInconclusive,last:this.lastReference},
+   routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};
  }
  hasLocalPricing(pool:string):boolean{return this.local?.hasReadySnapshot(pool)??false;}
+ async validateReferenceOnce():Promise<{accepted:boolean;message:string}>{
+  if(this.validationRunning||this.busy)return {accepted:false,message:'RPC quote or validation is already running'};
+  if(!this.local)return {accepted:false,message:'C2 local quote cache is not configured'};
+  const pool=this.pools.find(p=>p.owner===ORCA_WHIRLPOOL&&this.local?.hasReadySnapshot(p.address));
+  if(!pool)return {accepted:false,message:'No locally ready Whirlpool with tick-array dependencies'};
+  this.validationRunning=true;
+  const started=Date.now(),size=this.sizesUsd[0],raw=BigInt(Math.round(size*1e6));
+  const observed=new Date().toISOString();
+  let status:'match'|'mismatch'|'inconclusive'|'error'='inconclusive';
+  let localRaw:string|undefined,sdkRaw:string|undefined,deltaRaw:string|undefined;
+  let poolSlot:number|undefined,sdkPoolSlot:number|undefined;
+  let reason='different RPC/tick-array contexts are not execution verification';
+  try{
+   const before=this.local.quoteExact(pool.address,'USDC_TO_SOL',raw);
+   if(!before)throw new Error('Local quote expired before SDK cross-check');
+   localRaw=before.outputRaw;poolSlot=before.poolSlot;
+   const prepared=await this.preparePool(pool.address);
+   sdkPoolSlot=prepared.poolSlot;
+   const sdk=await swapQuoteByInputToken(prepared.pool,new PublicKey(USDC_MINT),
+    new BN(raw.toString()),Percentage.fromFraction(0,10000),
+    this.ctx.program.programId,this.client.getFetcher(),IGNORE_CACHE);
+   sdkRaw=sdk.estimatedAmountOut.toString();
+   const after=this.local.quoteExact(pool.address,'USDC_TO_SOL',raw);
+   if(!after||after.poolSlot!==before.poolSlot||
+      after.outputRaw!==before.outputRaw||prepared.poolSlot!==before.poolSlot){
+    status='inconclusive';
+    reason='Local or SDK pool state changed during separate reads; comparison not slot-identical';
+    this.referenceInconclusive++;
+   }else{
+    deltaRaw=(BigInt(sdkRaw)-BigInt(localRaw)).toString();
+    const matched=this.local.validateAgainstSdk(pool.address,'USDC_TO_SOL',raw.toString(),
+     sdkRaw,sdk.estimatedFeeAmount.toString());
+    status=matched?'match':'mismatch';
+    reason=matched?'Exact raw output and fee match against RPC SDK quote; tick-array slots still not proven identical':
+     'Local output or fee differs from independent RPC SDK; snapshots may be from different tick-array slots';
+    if(matched)this.referenceMatches++;else this.referenceMismatches++;
+   }
+   this.referenceChecks++;
+  }catch(error){
+   status='error';reason=String(error);this.referenceChecks++;this.referenceInconclusive++;
+  }finally{
+   this.lastReference={pool:pool.address,status,localRaw,sdkRaw,deltaRaw,
+    poolSlot,sdkPoolSlot,durationMs:Date.now()-started,checkedAt:observed,reason};
+   this.validationRunning=false;
+  }
+  return {accepted:true,message:'C2 reference comparison finished: '+status};
+ }
  private refreshLocalFromEvent(pool:string){
   if(!this.local)return;
   // Compute from cached account bytes on the WebSocket callback path:
