@@ -17,7 +17,7 @@ type Cached={
 export type ClmmQuote={
  pool:string;direction:'USDC_TO_SOL'|'SOL_TO_USDC';
  inputRaw:string;outputRaw:string;observedAt:string;computedAt:string;poolSlot:number;
- feeRaw:string;tickArraysObservedAt:string;tickArraySlot:null;
+ feeRaw:string;tickArraysObservedAt:string;tickArraySlot:number|null;
  quoteModel:'raydium_clmm_sdk_tick_array';
  snapshotIntegrity:'multi_rpc_context_unverified'|'same_context_cached';
 };
@@ -25,7 +25,8 @@ export type ClmmHealth={
  status:'idle'|'scanning'|'ok'|'partial_error';
  selectedPools:number;readyPools:number;quotes:ClmmQuote[];
  errors:string[];perPool:Array<{pool:string;status:'fresh'|'expired'|'missing'|'refreshing';reason?:string;
-   lastObservedAt?:string;ageMs?:number;tickArrays:number;slot?:number}>;
+   lastObservedAt?:string;ageMs?:number;tickArrays:number;slot?:number;
+   tickArraySlot?:number|null;tickArraySlotVerified?:boolean}>;
  scans:number;lastUpdatedAt?:string;
  poolAccountEvents?:number;selectiveScans?:number;pendingDirtyPools?:number;
  localEvents?:number;localRecomputations?:number;activeTickSubscriptions?:number;
@@ -252,13 +253,13 @@ export class ClmmMonitor {
      const entry:Cached={observedAt:started,finishedAt:new Date().toISOString(),
       slot:checked.context.slot,data,epochInfo,tickArrayCount:Object.keys(ticks).length,
       tickKeys:[],release:[],tickArraySlot:null,verifiedCache:!this.feed};
+     const previous=this.cache.get(pool.address);
      if(this.feed){
-      // The old snapshot stays available until the new one is installed.
-      // A rejected candidate snapshot is not silently called coherent.
+      // New watches are installed before prior ones are released.
+      // A rejected snapshot is not silently called coherent.
       await this.attachFeed(pool.address,entry);
      }else this.cache.set(pool.address,entry);
-     const old=this.cache.get(pool.address);
-     if(old!==entry&&old)old.release.forEach(stop=>stop());
+     if(previous&&previous!==entry)previous.release.forEach(stop=>stop());
      this.failures.delete(pool.address);
      this.onUpdate();
     }catch(e){
@@ -318,8 +319,11 @@ export class ClmmMonitor {
    const ageMs=cache?now-Date.parse(cache.observedAt):undefined;
    const status:'fresh'|'expired'|'missing'|'refreshing'=this.refreshing===p.address?'refreshing':
     !cache?'missing':!cache.verifiedCache?'expired':this.selected(cache,now)?'fresh':'expired';
-   return {pool:p.address,status,reason:this.failures.get(p.address),
-    lastObservedAt:cache?.observedAt,ageMs,tickArrays:cache?.tickArrayCount??0,slot:cache?.slot};
+   return {pool:p.address,status,
+    reason:this.failures.get(p.address)??(cache&&!cache.verifiedCache?'tick_array_state_incomplete_or_slot_skew':undefined),
+    lastObservedAt:cache?.observedAt,ageMs,tickArrays:cache?.tickArrayCount??0,
+    slot:cache?.slot,tickArraySlot:cache?.tickArraySlot??null,
+    tickArraySlotVerified:cache?.verifiedCache??false};
   });
   const quotes=this.getBuys();
   return {status:this.busy?'scanning':this.failures.size?'partial_error':'ok',
