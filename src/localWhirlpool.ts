@@ -230,17 +230,24 @@ export class LocalWhirlpoolQuoter{
     computedAt:new Date(now).toISOString(),quoteModel:'orca_whirlpool_sdk_in_memory'};
   }catch(error){this.lastErrorReason.set(pool,String(error));this.error('Local Whirlpool '+pool+': '+String(error));return null;}
  }
+ hasReadySnapshot(pool:string,now=Date.now()):boolean{
+  const layout=this.layouts.get(pool),decoded=this.decodePool(pool);
+  if(!layout||!decoded)return false;
+  if(PoolUtil.isInitializedWithAdaptiveFee(decoded.data))return false;
+  const aToB=decoded.data.tokenMintA.toBase58()===USDC_MINT;
+  const required=this.tickKeys(pool,decoded.data,aToB);
+  if(JSON.stringify(required)!==JSON.stringify(layout.directions.USDC_TO_SOL))return false;
+  const pieces:Array<{slot:number;receivedAt:number}>=[decoded.observation];
+  for(const {address} of required){
+   const item=this.feed.get(address)??this.feed.getVerifiedAbsent(address);
+   if(!item)return false;
+   pieces.push(item);
+  }
+  return validateLocalComponents(pieces,now,this.maxAgeMs,this.maxSlotSkew).ok;
+ }
  snapshot():LocalPricingHealth{
   let readyPools=0;
-  for(const [pool,layout] of this.layouts){
-   const base=this.feed.get(pool);
-   const tickKeys=layout.directions.USDC_TO_SOL.map(x=>x.address);
-   const ticks=tickKeys.map(address=>this.feed.get(address)??this.feed.getVerifiedAbsent(address));
-   if(!base||ticks.some(x=>!x))continue;
-   const checked=validateLocalComponents([base,...ticks.filter((x):x is {slot:number;receivedAt:number}=>Boolean(x))],
-    Date.now(),this.maxAgeMs,this.maxSlotSkew);
-   if(checked.ok)readyPools++;
-  }
+  for(const pool of this.layouts.keys())if(this.hasReadySnapshot(pool))readyPools++;
   return {trackedPools:this.layouts.size,preparedPools:this.layouts.size,readyPools,
    bootstrapReads:this.bootstrapReads,localCalculations:this.localCalculations,
    localErrors:this.localErrors,unsupportedPools:this.unsupportedPools,
