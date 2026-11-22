@@ -32,6 +32,7 @@ async function main(){
   reconcileMs:config.c3GraphReconcileMs,sizesUsd:config.c3GraphSizesUsd,
   maxPathChecks:config.c3GraphMaxPathChecks,maxResults:config.c3GraphMaxResults,
   minLiquidityUsd:config.c3GraphMinLiquidityUsd,
+  maxPoolInputShareBps:config.c3GraphMaxPoolInputBps,
   maxQuoteAgeMs:config.freshness.maxAgeMs,
   maxQuoteGapMs:config.freshness.maxGapMs,
   maxSlotSkew:config.freshness.maxSlotSkew,
