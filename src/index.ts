@@ -5,6 +5,7 @@ import {discoverPools} from './discovery.js';
 import {Scanner} from './scanner.js';
 import {JupiterMonitor} from './jupiter.js';
 import {buildCandidates} from './routes.js';
+import {AmmV4Monitor} from './ammV4.js';
 async function main(){
  const config=loadConfig();
  const jupiter=new JupiterMonitor(config.jupiter);
@@ -15,11 +16,13 @@ async function main(){
  if(!discovered.pools.length)console.warn('No validated pool accounts found: pool feed disabled; Jupiter quote monitor remains read-only.');
  config.pools=discovered.pools.map(p=>new PublicKey(p.address));
  const routes=buildCandidates(discovered.pools);
+ const ammV4=new AmmV4Monitor(validationConnection,discovered.pools,config.jupiter.sizesUsd);
+ ammV4.start();
  console.log(JSON.stringify({event:'discovery_complete',pools:discovered.pools.length,routeCandidates:routes.candidates.length,rejectedPools:routes.rejectedPools,warnings:discovered.warnings}));
  const scanner=new Scanner(config);
  const server=createServer((req,res)=>{
   const path=req.url?.split('?')[0];
-  if(!['/health','/pools','/discovery','/jupiter','/routes'].includes(path??'')){
+  if(!['/health','/pools','/discovery','/jupiter','/routes','/amm-v4'].includes(path??'')){
    res.writeHead(404);res.end('Not found');return;
   }
   const snapshot=scanner.snapshot();
@@ -29,6 +32,7 @@ async function main(){
    res.end(JSON.stringify({status:snapshot.status,lastPollAt:snapshot.lastPollAt,errors:snapshot.errors,trackedPools:snapshot.pools.length,stalePools:snapshot.pools.filter(p=>p.stale).length,jupiter:jupiter.snapshot().status,routeCandidates:routes.candidates.length,executableRoutes:0}));
   }else if(path==='/discovery')res.end(JSON.stringify(discovered));
   else if(path==='/jupiter')res.end(JSON.stringify(jupiter.snapshot()));
+  else if(path==='/amm-v4')res.end(JSON.stringify({...ammV4.snapshot(),note:'AMM v4 pool-level standalone indicative quotes only. No complete cross-DEX opportunity or executable transaction.'}));
   else if(path==='/routes'){
    const state=new Map(snapshot.pools.map(p=>[p.address,p]));
    const candidates=routes.candidates.map(candidate=>{
@@ -48,7 +52,7 @@ async function main(){
   }else res.end(JSON.stringify(snapshot));
  });
  server.listen(config.port,'127.0.0.1',()=>console.log(`http://127.0.0.1:${config.port}/routes`));
- const stop=async()=>{jupiter.stop();server.close();await scanner.stop();};
+ const stop=async()=>{jupiter.stop();ammV4.stop();server.close();await scanner.stop();};
  process.once('SIGINT',()=>{void stop();});
  process.once('SIGTERM',()=>{void stop();});
  await scanner.start();
