@@ -7,6 +7,7 @@
  */
 export type RpcLimitOptions={
  minSpacingMs:number;
+ maxConcurrent?:number;
  maxRetries:number;
  initialBackoffMs:number;
  maxBackoffMs:number;
@@ -20,6 +21,9 @@ export type RpcLimitSnapshot={
  last429At?:string;
  cooldownUntil?:string;
  minSpacingMs:number;
+ maxConcurrent:number;
+ inFlight:number;
+ pending:number;
  queued:boolean;
 };
 
@@ -33,8 +37,11 @@ export function parseRetryAfterMs(value:string|null,now=Date.now()):number|null 
 }
 
 export class RpcHttpLimiter {
- private chain:Promise<void>=Promise.resolve();
+ private pacing:Promise<void>=Promise.resolve();
+ private readonly capacity:number;
+ private waiters:Array<()=>void>=[];
  private waiting=0;
+ private running=0;
  private lastAttemptAt=0;
  private cooldownUntil=0;
  private calls=0;
@@ -45,7 +52,9 @@ export class RpcHttpLimiter {
  private last429At?:string;
 
  constructor(private readonly options:RpcLimitOptions,private readonly transport:typeof fetch=globalThis.fetch){
-  if(!Number.isSafeInteger(options.minSpacingMs)||options.minSpacingMs<0||
+  this.capacity=options.maxConcurrent??1;
+  if(!Number.isSafeInteger(this.capacity)||this.capacity<1||this.capacity>16||
+     !Number.isSafeInteger(options.minSpacingMs)||options.minSpacingMs<0||
      !Number.isSafeInteger(options.maxRetries)||options.maxRetries<0||options.maxRetries>5||
      !Number.isSafeInteger(options.initialBackoffMs)||options.initialBackoffMs<1||
      !Number.isSafeInteger(options.maxBackoffMs)||options.maxBackoffMs<options.initialBackoffMs){
@@ -57,20 +66,32 @@ export class RpcHttpLimiter {
    retryAttempts:this.retryAttempts,transportErrors:this.transportErrors,
    last429At:this.last429At,
    cooldownUntil:this.cooldownUntil>Date.now()?new Date(this.cooldownUntil).toISOString():undefined,
-   minSpacingMs:this.options.minSpacingMs,queued:this.waiting>0};
+   minSpacingMs:this.options.minSpacingMs,maxConcurrent:this.capacity,
+   inFlight:this.running,pending:Math.max(0,this.waiting-this.running),
+   queued:this.waiting>this.running};
  }
  private async exclusive<T>(action:()=>Promise<T>):Promise<T>{
   this.waiting++;
-  const previous=this.chain;
+  if(this.running>=this.capacity){
+   await new Promise<void>(resolve=>this.waiters.push(resolve));
+  }
+  this.running++;
+  // Only pace the initiation of requests. Do not hold a provider-wide lock
+  // while the HTTP response is pending: independent reads overlap safely.
+  const previous=this.pacing;
   let release!:()=>void;
-  this.chain=new Promise<void>(resolve=>{release=resolve;});
+  this.pacing=new Promise<void>(resolve=>{release=resolve});
   await previous;
   try{
    const until=Math.max(this.cooldownUntil,this.lastAttemptAt+this.options.minSpacingMs);
    if(until>Date.now())await sleep(until-Date.now());
    this.lastAttemptAt=Date.now();
-   return await action();
-  }finally{this.waiting--;release();}
+  }finally{release()}
+  try{return await action()}
+  finally{
+   this.running--;this.waiting--;
+   this.waiters.shift()?.();
+  }
  }
  readonly fetch:typeof globalThis.fetch=async (input,init)=>{
   this.calls++;
