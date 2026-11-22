@@ -15,7 +15,7 @@ type Cached={
  tickArraySlot:number|null;verifiedCache:boolean;
 };
 export type ClmmQuote={
- pool:string;direction:'USDC_TO_SOL'|'SOL_TO_USDC';
+ pool:string;direction:'USDC_TO_SOL'|'SOL_TO_USDC'|'GENERIC_INPUT';
  inputRaw:string;outputRaw:string;observedAt:string;computedAt:string;poolSlot:number;
  feeRaw:string;tickArraysObservedAt:string;tickArraySlot:number|null;
  quoteModel:'raydium_clmm_sdk_tick_array';
@@ -77,10 +77,14 @@ export class ClmmMonitor {
   private readonly maxCacheAgeMs:number,
   private readonly onUpdate:()=>void,
   private readonly feed?:MarketDataFeed,
-  private readonly maxSlotSkew=12
+  private readonly maxSlotSkew=12,
+  private readonly permittedMints?:ReadonlySet<string>,
+  private readonly dependencyPrefix=''
  ){
   if(this.feed)this.feedListener=this.feed.onUpdate(update=>{
-   for(const poolId of update.affectedPools){
+   for(const dependency of update.affectedPools){
+    if(this.dependencyPrefix&&!dependency.startsWith(this.dependencyPrefix))continue;
+    const poolId=this.dependencyPrefix?dependency.slice(this.dependencyPrefix.length):dependency;
     if(!this.cache.has(poolId))continue;
     this.localEvents++;
     if(this.applyFeedState(poolId))this.onUpdate();
@@ -106,7 +110,7 @@ export class ClmmMonitor {
   if(!previous)return;
   previous.release.forEach(stop=>stop());
   this.cache.delete(pool);
-  if(this.feed?.hasDependencies(pool))this.feed.setDependencies(pool,[pool]);
+  if(this.feed?.hasDependencies(this.dependencyPrefix+pool))this.feed.clearDependencies(this.dependencyPrefix+pool);
  }
  /** Update cached CLMM swap parameters from the same slot-aware pool/tick
   * account stream. No SDK/RPC request occurs in this callback.
@@ -187,14 +191,14 @@ export class ClmmMonitor {
    entry.data.rpcPoolInfo.configId.toBase58(),
    entry.data.computePoolInfo.exBitmapAccount.toBase58()
   ];
-  const allKeys=[...new Set([...keys,...extraKeys])];
+  const allKeys=[...new Set([pool,...keys,...extraKeys])];
   const releases:(()=>void)[]=[];
   try{
    for(const address of allKeys){
     this.feed.expectOwner(address,RAYDIUM_CLMM);
     releases.push(this.feed.watch(address));
    }
-   this.feed.setDependencies(pool,[pool,...allKeys]);
+   this.feed.setDependencies(this.dependencyPrefix+pool,[pool,...allKeys]);
    await this.feed.reconcile([pool,...allKeys],'rpc_bootstrap');
    entry.tickKeys=keys;entry.extraKeys=extraKeys;
    entry.release=releases;
@@ -202,20 +206,28 @@ export class ClmmMonitor {
    this.applyFeedState(pool);
   }catch(error){
    releases.forEach(stop=>stop());
-   this.feed.setDependencies(pool,[pool]);
+   this.feed.clearDependencies(this.dependencyPrefix+pool);
    throw error;
   }
  }
 
  quoteExact(pool:string,direction:'USDC_TO_SOL'|'SOL_TO_USDC',inputRaw:bigint):ClmmQuote|null{
+  return this.quoteByInputMint(pool,direction==='USDC_TO_SOL'?USDC_MINT:SOL_MINT,inputRaw,direction);
+ }
+ quoteByInputMint(pool:string,mint:string,inputRaw:bigint,
+  direction:ClmmQuote['direction']='GENERIC_INPUT'):ClmmQuote|null{
   const cache=this.cache.get(pool);
   if(!cache||!this.selected(cache)||this.feed&&!cache.verifiedCache)return null;
   const {data,epochInfo}=cache;
-  if(!isClmmPair(data.poolInfo.mintA.address,data.poolInfo.mintB.address))return null;
+  if(this.permittedMints
+    ?(!this.permittedMints.has(data.poolInfo.mintA.address)||
+      !this.permittedMints.has(data.poolInfo.mintB.address)||
+      data.poolInfo.mintA.address===data.poolInfo.mintB.address)
+    :!isClmmPair(data.poolInfo.mintA.address,data.poolInfo.mintB.address))return null;
+  if(mint!==data.poolInfo.mintA.address&&mint!==data.poolInfo.mintB.address)return null;
   if(data.poolInfo.programId!==RAYDIUM_CLMM)return null;
   const ticks=data.tickData[pool];
   if(!ticks||!Object.keys(ticks).length)return null;
-  const mint=direction==='USDC_TO_SOL'?USDC_MINT:SOL_MINT;
   try{
    const amountIn=new BN(inputRaw.toString());
    const estimate=PoolUtils.computeAmountOut({
@@ -242,6 +254,13 @@ export class ClmmMonitor {
    };
   }catch{return null;}
  }
+ graphSnapshot(pool:string,now=Date.now()){
+  const cache=this.cache.get(pool);
+  if(!cache||!this.selected(cache,now)||!cache.verifiedCache||cache.tickArraySlot===null)return null;
+  return {mintA:cache.data.poolInfo.mintA.address,mintB:cache.data.poolInfo.mintB.address,
+   observedAt:cache.observedAt,poolSlot:cache.slot,tickSlot:cache.tickArraySlot};
+ }
+ replacePools(pools:DiscoveredPool[]){this.pools.splice(0,this.pools.length,...pools);}
  getBuys():ClmmQuote[]{
   const quotes:ClmmQuote[]=[];
   for(const pool of this.chosen())for(const size of this.sizesUsd){
@@ -270,7 +289,11 @@ export class ClmmMonitor {
      // The Raydium SDK traverses real liquidity ranges and tick arrays.
      const data=await sdk.clmm.getPoolInfoFromRpc(pool.address);
      if(data.poolInfo.programId!==RAYDIUM_CLMM||
-       !isClmmPair(data.poolInfo.mintA.address,data.poolInfo.mintB.address))
+       (this.permittedMints
+        ?(!this.permittedMints.has(data.poolInfo.mintA.address)||
+          !this.permittedMints.has(data.poolInfo.mintB.address)||
+          data.poolInfo.mintA.address===data.poolInfo.mintB.address)
+        :!isClmmPair(data.poolInfo.mintA.address,data.poolInfo.mintB.address)))
       throw new Error('CLMM mint/program mismatch');
      const ticks=data.tickData[pool.address];
      if(!ticks||!Object.keys(ticks).length)throw new Error('missing or uninitialized tick arrays');
