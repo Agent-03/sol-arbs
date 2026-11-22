@@ -78,11 +78,11 @@ export class MarketEngine {
   this.lastDiscoveryAt=new Date().toISOString();
   this.lastDiscoveryAttempt=Date.now();
   this.ray=new LiveRaydiumMonitor(
-   conn,this.pools,config.jupiter.sizesUsd,config.ammMaxSlotSkew,
+   conn,this.pools,config.b5QuoteSizesUsd,config.ammMaxSlotSkew,
    config.b5MaxComponentAgeMs,config.minQuoteLiquidityUsd,
    config.b5ReconcileMs,event=>this.onRaydiumEvent(event)
   );
-  this.orca=new OrcaMonitor(conn,this.pools,config.jupiter.sizesUsd,
+  this.orca=new OrcaMonitor(conn,this.pools,config.b5QuoteSizesUsd,
    ()=>this.ray.snapshot().quotes,config.jupiter.assumedCostUsd,
    config.b5OrcaRefreshMs,config.minQuoteLiquidityUsd);
   this.note('info','startup','B5 read-only engine initialized. Raydium vaults: WebSocket state; Orca: SDK refreshes.');
