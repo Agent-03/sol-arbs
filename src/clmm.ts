@@ -175,7 +175,7 @@ export class ClmmMonitor {
   const perPool=selected.map(p=>{
    const cache=this.cache.get(p.address);
    const ageMs=cache?now-Date.parse(cache.observedAt):undefined;
-   const status=this.refreshing===p.address?'refreshing':
+   const status:'fresh'|'expired'|'missing'|'refreshing'=this.refreshing===p.address?'refreshing':
     !cache?'missing':this.selected(cache,now)?'fresh':'expired';
    return {pool:p.address,status,reason:this.failures.get(p.address),
     lastObservedAt:cache?.observedAt,ageMs,tickArrays:cache?.tickArrayCount??0,slot:cache?.slot};
