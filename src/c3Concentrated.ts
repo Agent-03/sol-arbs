@@ -1,4 +1,4 @@
-import {Connection,PublicKey,Keypair,type AccountInfo} from '@solana/web3.js';
+import {Connection,PublicKey,Keypair} from '@solana/web3.js';
 import {AnchorProvider,Wallet} from '@coral-xyz/anchor';
 import {WhirlpoolContext,buildWhirlpoolClient,ParsableWhirlpool} from '@orca-so/whirlpools-sdk';
 import {ORCA_WHIRLPOOL,RAYDIUM_CLMM} from './routes.js';
@@ -12,9 +12,6 @@ type Candidate={address:string;tokenA:GraphAsset;tokenB:GraphAsset;liquidityUsd:
  program:'orca_whirlpool'|'raydium_clmm'};
 const whitelist=new Set(Object.values(GRAPH_ASSETS).map(v=>v.mint));
 const ctxPrefix='c3c:';
-const accountValue=(owner:string,data:Buffer):AccountInfo<Buffer>=>({
- owner:new PublicKey(owner),data,lamports:0,executable:false,rentEpoch:0
-});
 export function parseOrcaGraphCandidates(payload:unknown):Candidate[]{
  const value=payload as {data?:unknown;pools?:unknown};
  const nested=value?.data;
@@ -63,7 +60,6 @@ export class C3Concentrated{
  private timer?:ReturnType<typeof setInterval>;
  private failures:string[]=[];
  private quoteAttempts=0;private quoteMisses=0;
- private lastRefreshAt=0;
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
   private readonly opts:{maxPools:number;perPair:number;minLiquidityUsd:number;
    maxAgeMs:number;maxSlotSkew:number;refreshMs:number},
@@ -75,7 +71,7 @@ export class C3Concentrated{
   this.orca=new LocalWhirlpoolQuoter(feed,ctx.program.programId,client.getFetcher(),
    opts.maxAgeMs,opts.maxSlotSkew,notify,whitelist,ctxPrefix);
   this.clmm=new ClmmMonitor(rpc,[],[5],opts.minLiquidityUsd,
-   opts.maxPools,Math.max(45000,opts.refreshMs),opts.maxAgeMs,notify,
+   Math.min(6,opts.maxPools),45000,opts.maxAgeMs,notify,
    feed,opts.maxSlotSkew,whitelist,ctxPrefix);
  }
  private error(error:unknown){this.failures.unshift(String(error));this.failures=this.failures.slice(0,8);}
@@ -156,13 +152,14 @@ export class C3Concentrated{
     this.pools.set(c.address,c);
     try{await this.orca.prepare(c.address)}catch(err){this.error('Orca '+c.address+': '+String(err))}
    }
-   this.lastRefreshAt=Date.now();this.notify();
+   this.notify();
   }catch(error){this.error('C3C Orca discovery: '+String(error))}
   finally{this.refreshing=false}
  }
  start(){
   if(this.running)return;
   this.running=true;
+  this.clmm.start();
   void this.discoverOrca();
   this.timer=setInterval(()=>{void this.discoverOrca()},this.opts.refreshMs);
  }
