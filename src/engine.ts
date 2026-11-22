@@ -364,7 +364,8 @@ export class MarketEngine {
    {label:'Unprofitable',count:comparison.negativeComparable,reason:'Valid research comparisons with net ≤ 0'},
    {label:'Positive estimate',count:comparison.positiveComparable,reason:'Positive estimate; not simulated or executable'},
    {label:'Stale / unaligned',count:comparison.excluded,reason:'Time, slot or liquidity checks failed'},
-   {label:'Missing route',count:this.combination.unmatchedReverseLegs,reason:'No exact-input Orca reverse quote for Raydium leg'}
+   {label:'Missing reverse route',count:this.config.b52OrcaQuoteMode==='fast'?0:this.combination.unmatchedReverseLegs,
+    reason:this.config.b52OrcaQuoteMode==='fast'?'Reverse direction deliberately paused in fast diagnostic mode':'No exact-input Orca reverse quote for Raydium leg'}
   ];
   const reasons=Object.entries(comparison.excludedByReason).sort((a,b)=>b[1]-a[1]);
   return {
@@ -391,7 +392,10 @@ export class MarketEngine {
     latency:this.percentiles(),latencyDefinition:'Milliseconds from local update callback receipt to local route recomputation (not chain-to-bot latency)',
     routeEvaluations:this.combination.evaluated,
     clmmEvaluations:this.combination.clmmEvaluated,
-    exactInputMisses:this.combination.unmatchedReverseLegs,
+    exactInputMisses:this.config.b52OrcaQuoteMode==='fast'?0:this.combination.unmatchedReverseLegs,
+    unmonitoredReverseDirections:this.config.b52OrcaQuoteMode==='fast',
+    scanTiming:{durationMs:o.lastScanDurationMs,firstBuyMs:o.lastFirstBuyDelayMs,
+      poolPreparationMs:o.lastPoolSetupMs,buyQuotes:o.lastBuyCount,reverseQuotes:o.lastReverseCount},
     evaluationFailures:this.combination.failed,
     statuses,topExclusionReason:reasons[0]?.[0]??null,
     limitations:['Orca SDK tick arrays use RPC, not a fully memory-resident quote engine',
