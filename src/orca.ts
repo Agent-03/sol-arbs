@@ -2,7 +2,7 @@ import {Connection,Keypair,PublicKey} from '@solana/web3.js';
 import {AnchorProvider,Wallet} from '@coral-xyz/anchor';
 import BN from 'bn.js';
 import {Percentage} from '@orca-so/common-sdk';
-import {WhirlpoolContext,buildWhirlpoolClient,swapQuoteByInputToken,IGNORE_CACHE} from '@orca-so/whirlpools-sdk';
+import {WhirlpoolContext,buildWhirlpoolClient,swapQuoteByInputToken,IGNORE_CACHE,PREFER_CACHE,type Whirlpool} from '@orca-so/whirlpools-sdk';
 import {SOL_MINT,USDC_MINT,type DiscoveredPool} from './discovery.js';
 import {ORCA_WHIRLPOOL} from './routes.js';
 import {amountOutExactInput,type AmmV4Quote} from './ammV4.js';
@@ -56,22 +56,28 @@ export class OrcaMonitor{
   this.client=buildWhirlpoolClient(this.ctx);
  }
  snapshot():OrcaStatus{return {...this.state,quotedLegs:[...this.state.quotedLegs],routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};}
- private async quote(poolAddress:string,direction:'USDC_TO_SOL'|'SOL_TO_USDC',inputRaw:bigint):Promise<OrcaQuote>{
-  if(inputRaw<=0n)throw new Error('Invalid quote amount');
+ private async preparePool(poolAddress:string):Promise<{pool:Whirlpool;poolSlot:number}>{
   const address=new PublicKey(poolAddress);
   const account=await this.connection.getAccountInfoAndContext(address,'confirmed');
   if(!account.value||account.value.owner.toBase58()!==ORCA_WHIRLPOOL)throw new Error('Invalid Whirlpool owner');
-  const pool=await this.client.getPool(address);
+  // Only one fresh pool fetch per cycle. No per-size reloading of the same pool.
+  const pool=await this.client.getPool(address,IGNORE_CACHE);
   const data=pool.getData();
   const a=data.tokenMintA.toBase58(),b=data.tokenMintB.toBase58();
   if(!((a===SOL_MINT&&b===USDC_MINT)||(a===USDC_MINT&&b===SOL_MINT)))throw new Error('Unexpected Whirlpool token mints');
+  return {pool,poolSlot:account.context.slot};
+ }
+ private async quote(poolAddress:string,pool:Whirlpool,poolSlot:number,direction:'USDC_TO_SOL'|'SOL_TO_USDC',inputRaw:bigint,refreshTicks:boolean):Promise<OrcaQuote>{
+  if(inputRaw<=0n)throw new Error('Invalid quote amount');
   const inputMint=direction==='USDC_TO_SOL'?USDC_MINT:SOL_MINT;
+  // Refresh tick arrays once per direction per cycle; subsequent size quotes use
+  // that cycle's cached arrays. This reduces RPC load but does not ensure a coherent slot.
   const result=await swapQuoteByInputToken(pool,new PublicKey(inputMint),new BN(inputRaw.toString()),
-   Percentage.fromFraction(0,10000),this.ctx.program.programId,this.client.getFetcher(),IGNORE_CACHE);
-  if(result.estimatedAmountOut.isNeg()||result.estimatedAmountOut.isZero())throw new Error('No executable amount-out in Whirlpool quote');
+   Percentage.fromFraction(0,10000),this.ctx.program.programId,this.client.getFetcher(),refreshTicks?IGNORE_CACHE:PREFER_CACHE);
+  if(result.estimatedAmountOut.isNeg()||result.estimatedAmountOut.isZero())throw new Error('No output in Whirlpool quote');
   return {pool:poolAddress,direction,inputRaw:inputRaw.toString(),outputRaw:result.estimatedAmountOut.toString(),
    feeRaw:result.estimatedFeeAmount.toString(),observedAt:new Date().toISOString(),
-   poolSlot:account.context.slot,classification:'indicative_non_executable'};
+   poolSlot,classification:'indicative_non_executable'};
  }
  async scanOnce(){
   if(this.busy)return;this.busy=true;
@@ -84,10 +90,15 @@ export class OrcaMonitor{
    const bySize=new Map<number,AmmV4Quote[]>();
    for(const q of rayQuotes){const size=Number(BigInt(q.inputRaw))/1e6;bySize.set(size,[...(bySize.get(size)??[]),q]);}
    for(const pool of orca){
+    let prepared: {pool:Whirlpool;poolSlot:number};
+    try{prepared=await this.preparePool(pool.address);}
+    catch(e){errors.push(`Orca pool ${pool.address}: ${String(e)}`);continue;}
+    let buyTicksRefreshed=false;
+    let sellTicksRefreshed=false;
     for(const size of this.sizesUsd){
      const amount=BigInt(Math.round(size*1e6));
      try{
-      const buy=await this.quote(pool.address,'USDC_TO_SOL',amount);legs.push(buy);
+      const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;legs.push(buy);
       // Buy Orca, sell Raydium using each known Raydium pool's USDC-side output reserve.
       for(const ray of bySize.get(size)??[]){
        try{
@@ -101,7 +112,7 @@ export class OrcaMonitor{
       // Buy Raydium, sell Orca at EXACT amount produced by first leg.
       for(const ray of bySize.get(size)??[]){
        try{
-        const sell=await this.quote(pool.address,'SOL_TO_USDC',BigInt(ray.outputRaw));legs.push(sell);
+        const sell=await this.quote(pool.address,prepared.pool,prepared.poolSlot,'SOL_TO_USDC',BigInt(ray.outputRaw),!sellTicksRefreshed);sellTicksRefreshed=true;legs.push(sell);
         candidates.push(evaluateRoute(size,
          {pool:ray.pool,venue:'raydium',inputRaw:ray.inputRaw,outputRaw:ray.outputRaw,observedAt:ray.observedAt},
          {pool:pool.address,venue:'orca',inputRaw:sell.inputRaw,outputRaw:sell.outputRaw,observedAt:sell.observedAt},
