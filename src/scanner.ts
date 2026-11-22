@@ -2,11 +2,13 @@ import {createHash} from 'node:crypto';
 import {Connection,PublicKey,type AccountInfo} from '@solana/web3.js';
 import type {Config} from './config.js';
 import {Journal,type PoolEvent} from './store.js';
+export type PoolChange={address:string;slot:number;observedAt:string;source:'websocket'|'poll'};
 export type PoolState={address:string;slot:number;observedAt:string;source:'websocket'|'poll';owner:string;lamports:number;dataLength:number;dataHash:string};
 export class Scanner{
  private conn:Connection;
  private journal:Journal;
  private state=new Map<string,PoolState>();
+ private listeners=new Set<(event:PoolChange)=>void>();
  private ids=new Map<string,number>();
  private timer?:ReturnType<typeof setInterval>;
  private running=false;
@@ -16,6 +18,10 @@ export class Scanner{
  constructor(private readonly config:Config,connection?:Connection){
   this.conn=connection??new Connection(config.rpcUrl,{commitment:'confirmed',wsEndpoint:config.wsUrl});
   this.journal=new Journal(config.dataDir);
+ }
+ onUpdate(listener:(event:PoolChange)=>void):()=>void{
+  this.listeners.add(listener);
+  return ()=>this.listeners.delete(listener);
  }
  private async record(event:PoolEvent){
   try{await this.journal.append(event);}catch(error){this.errors++;console.error('Journal error',error);}
@@ -27,6 +33,8 @@ export class Scanner{
   if(prev&&(slot<prev.slot||(slot===prev.slot&&dataHash===prev.dataHash)))return;
   const next={address,slot,observedAt,source,owner:info.owner.toBase58(),lamports:info.lamports,dataLength:info.data.length,dataHash};
   this.state.set(address,next);
+  for(const listener of this.listeners)try{listener({address,slot,observedAt,source});}
+   catch(error){console.warn('Pool change listener failed:',String(error));}
   await this.record({kind:'account_update',...next});
   if(process.env.LOG_ACCOUNT_UPDATES==='1')console.log(JSON.stringify({event:'account_update',address,slot,source}));
  }
