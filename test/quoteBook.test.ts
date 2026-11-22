@@ -44,3 +44,11 @@ test('removed pools are removed from the quote book',()=>{
  book.retain(new Set(['orca-2']));
  assert.deepEqual(book.snapshot(t,15000).entries.map(q=>q.pool),['orca-2']);
 });
+test('failed quote refresh never advances last completed timestamp',()=>{
+ const book=new LastKnownQuoteBook<Q>();
+ const before=new Date(t).toISOString(),later=new Date(t+4000).toISOString();
+ book.publish(a('orca-1'));book.complete('orca-1',before);
+ book.begin('orca-1');book.complete('orca-1',later);
+ const s=book.snapshot(t+5000,15000);
+ assert.equal(s.poolStatus[0].lastCompletedAt,before);
+});
