@@ -76,6 +76,7 @@ export class LiveRaydiumMonitor{
  private setComponent(pool:WatchedPool,address:string,info:AccountInfo<Buffer>,slot:number,source:'websocket'|'reconcile',receivedAt=Date.now()){
   const existing=pool.components.get(address);
   if(existing&&slot<existing.slot)return;
+  if(existing&&slot===existing.slot&&existing.data.equals(info.data))return;
   const isPool=address===pool.address;
   try{
    if(isPool){
