@@ -103,6 +103,10 @@ export class MarketDataFeed{
   if(expected&&expected!==owner){this.ownerMismatchDrops++;return false;}
   const data=Buffer.from(info.data);
   const hash=createHash('sha256').update(data).digest('hex');
+  const knownAbsent=this.absent.get(address);
+  if(knownAbsent&&slot<knownAbsent.slot){
+   this.olderSlotDrops++;return false;
+  }
   const existing=this.accounts.get(address);
   if(existing){
    if(slot<existing.slot){this.olderSlotDrops++;return false;}
@@ -174,7 +178,9 @@ export class MarketDataFeed{
     if(info)this.ingest(batch[i],info,values.context.slot,source,at);
     else{
      const address=batch[i],existing=this.accounts.get(address);
-     if(!existing||existing.slot<=values.context.slot){
+     const previouslyAbsent=this.absent.get(address);
+     if((!existing||existing.slot<=values.context.slot)&&
+        (!previouslyAbsent||previouslyAbsent.slot<=values.context.slot)){
       this.accounts.delete(address);
       this.absent.set(address,{slot:values.context.slot,receivedAt:at});
      }
