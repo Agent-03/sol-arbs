@@ -280,7 +280,7 @@ export class MeteoraDlmmMonitor{
    this.feed.setDependencies(ctxPrefix+entry.candidate.address,all);
    entry.binX=binX;entry.binY=binY;entry.bitmap=bitmap;
    entry.lastReindexAt=Date.now();entry.needsReindex=false;
-   entry.windowBinIndex=this.poolBinArrayIndex(entry);
+   entry.windowBinIndex=this.poolBinArrayIndex(entry)??undefined;
    this.verifiedAccountRefreshes++;
   }finally{
    for(const release of newReleases.values())release();
