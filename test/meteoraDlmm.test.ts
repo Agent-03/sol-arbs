@@ -84,7 +84,7 @@ test('C3D.4.1 concurrent per-pool batches refresh all DLMM slots without relaxin
  const count=16,sol=new PublicKey(GRAPH_ASSETS.SOL.mint),token=new PublicKey(pk(120));
  const locations=new Map<string,{owner:PublicKey;data:Buffer}>();
  const poolAddresses:string[]=[];
- let inFlight=0,peak=0;
+ let inFlight=0,peak=0,failOnce=false;
  const groups:string[][]=[];
  for(let i=0;i<count;i++){
   const pool=pk(i+20),a=pk(i+50),b=pk(i+80);
@@ -99,6 +99,9 @@ test('C3D.4.1 concurrent per-pool batches refresh all DLMM slots without relaxin
    groups.push(keys.map(x=>x.toBase58()));
    await new Promise(resolve=>setTimeout(resolve,5));
    inFlight--;
+   if(failOnce&&keys[0].toBase58()===poolAddresses[0]){
+    failOnce=false;throw Error('transient provider timeout');
+   }
    return {context:{slot:8888},value:keys.map(x=>{
     const item=locations.get(x.toBase58());
     return item?{owner:item.owner,data:item.data,lamports:1,
@@ -151,5 +154,25 @@ test('C3D.4.1 concurrent per-pool batches refresh all DLMM slots without relaxin
   assert.equal(snap.reasonCounts.component_age??0,0);
   assert.ok(snap.oldestAccountAgeMs!==null&&snap.oldestAccountAgeMs<15000);
   assert.equal(snap.recoveryCount,0);
+  // A failed per-pool fetch must not abort the other RPC workers.
+  failOnce=true;
+  const bad=entries.get(poolAddresses[0]) as {
+   lastVerifiedAt:number;retryAfter:number;refreshFailures:number
+  };
+  bad.lastVerifiedAt=0;
+  await mon.refresh();
+  snap=mon.snapshot();
+  assert.equal(snap.refreshFailures,1);
+  assert.equal(snap.backoffPools,1);
+  assert.ok(snap.refreshSuccesses>=23);
+  assert.equal(bad.refreshFailures,1);
+  assert.ok(bad.retryAfter>Date.now());
+  // Simulate cooldown expiry; the next successful read clears the error.
+  bad.retryAfter=0;
+  await mon.refresh();
+  snap=mon.snapshot();
+  assert.equal(bad.refreshFailures,0);
+  assert.equal(snap.backoffPools,0);
+  assert.equal(snap.status,'ready');
  }finally{mon.stop();await feed.stop()}
 });
