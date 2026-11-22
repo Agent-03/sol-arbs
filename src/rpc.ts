@@ -34,6 +34,8 @@ export type RpcLimitSnapshot={
  oldestQueuedMs:number;
  queueWaitMsAvg:Record<RpcPriority,number>;
  queueWaitMsP95:Record<RpcPriority,number>;
+ pacingMsAvg:Record<RpcPriority,number>;
+ pacingMsP95:Record<RpcPriority,number>;
  transportMsAvg:Record<RpcPriority,number>;
  transportMsP95:Record<RpcPriority,number>;
  priorityDispatches:Record<RpcPriority,number>;
@@ -66,6 +68,7 @@ export class RpcHttpLimiter {
  private readonly active=counts();
  private readonly dispatches=counts();
  private readonly queueWaits=values();
+ private readonly pacingTimes=values();
  private readonly transportTimes=values();
  private highStreak=0;
  private lastAttemptAt=0;
@@ -108,6 +111,7 @@ export class RpcHttpLimiter {
    oldestQueuedMs:this.waiters.length?
     Math.max(...this.waiters.map(w=>Date.now()-w.queuedAt)):0,
    queueWaitMsAvg:sample(this.queueWaits,mean),queueWaitMsP95:sample(this.queueWaits,p95),
+   pacingMsAvg:sample(this.pacingTimes,mean),pacingMsP95:sample(this.pacingTimes,p95),
    transportMsAvg:sample(this.transportTimes,mean),
    transportMsP95:sample(this.transportTimes,p95),
    priorityDispatches:{...this.dispatches}};
@@ -156,6 +160,7 @@ export class RpcHttpLimiter {
   onTiming:((event:RpcTiming)=>void)|undefined,
   action:()=>Promise<T>):Promise<T>{
   const waited=await this.acquire(priority);
+  const acquiredAt=Date.now();
   // Only pace request initiation, not network time.
   const previous=this.pacing;
   let releasePacing!:()=>void;
@@ -166,9 +171,12 @@ export class RpcHttpLimiter {
    if(until>Date.now())await sleep(until-Date.now());
    this.lastAttemptAt=Date.now();
   }finally{releasePacing()}
-  const started=Date.now();
+  const started=Date.now(),pacingWaitMs=started-acquiredAt;
+  this.record(this.pacingTimes,priority,pacingWaitMs);
   try{
-   onTiming?.({phase:'started',priority,queueWaitMs:waited});
+   // Observability callbacks must never change RPC delivery.
+   try{onTiming?.({phase:'started',priority,queueWaitMs:waited,pacingWaitMs})}
+   catch{ /* diagnostics are advisory */ }
    return await action();
   }finally{
    const duration=Date.now()-started;
@@ -189,12 +197,12 @@ export class RpcHttpLimiter {
     try{received=await this.transport(input,init);}
     catch(error){
      this.transportErrors++;
-     context.onTiming?.({phase:'completed',priority,queueWaitMs:0,
-      transportMs:Date.now()-started});
+     try{context.onTiming?.({phase:'completed',priority,queueWaitMs:0,
+      transportMs:Date.now()-started})}catch{ /* diagnostics are advisory */ }
      throw error;
     }
-    context.onTiming?.({phase:'completed',priority,queueWaitMs:0,
-     transportMs:Date.now()-started,status:received.status});
+    try{context.onTiming?.({phase:'completed',priority,queueWaitMs:0,
+     transportMs:Date.now()-started,status:received.status})}catch{ /* diagnostics are advisory */ }
     if(received.status===429){
      this.rateLimits++;
      this.last429At=new Date().toISOString();
