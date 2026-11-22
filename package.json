@@ -14,7 +14,7 @@
     "dotenv": "^16.6.1",
     "@orca-so/whirlpools-sdk": "^0.22.0",
     "@orca-so/common-sdk": "^0.7.1",
-    "@coral-xyz/anchor": "^0.31.1",
+    "@coral-xyz/anchor": "~0.32.1",
     "bn.js": "^5.2.2"
   },
   "devDependencies": {
