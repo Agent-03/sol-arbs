@@ -101,3 +101,11 @@ test('CLMM reverse SDK output is never fabricated if exact-input quote unavailab
  assert.ok(x.unmatchedReverseLegs>0);
  assert.equal(x.failed,1);
 });
+
+test('C2 invalidated last-known Orca quotes cannot create research routes',()=>{
+ const marked={...orcaBuy,invalidated:true};
+ const result=combineLiveQuotes([ray],[marked,orcaSell],0.02,liquidity);
+ assert.equal(result.candidates.filter(c=>c.buyVenue==='orca').length,0);
+ const allInvalid=combineLiveQuotes([ray],[marked,{...orcaSell,invalidated:true}],0.02,liquidity);
+ assert.equal(allInvalid.candidates.length,0);
+});
