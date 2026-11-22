@@ -95,6 +95,6 @@ export class Scanner{
   this.running=false;
   if(this.timer)clearInterval(this.timer);
   await Promise.allSettled([...this.ids.values()].map(id=>this.conn.removeAccountChangeListener(id)));
-  this.ids=[];
+  this.ids.clear();
  }
 }
