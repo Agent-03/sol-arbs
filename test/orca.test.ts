@@ -14,9 +14,14 @@ test('reject a non-contiguous route',()=>{
  assert.throws(()=>evaluateRoute(10,{pool:'ray',venue:'raydium',inputRaw:'10000000',outputRaw:'143000000',observedAt:t},
  {pool:'orca',venue:'orca',inputRaw:'142000000',outputRaw:'10050000',observedAt:t},0.02));
 });
-test('reject same-venue and same-pool routes',()=>{
+test('permit separate pools on same venue, reject reusing the same pool',()=>{
+ const candidate=evaluateRoute(5,{pool:'A',venue:'raydium',inputRaw:'5000000',outputRaw:'100',observedAt:t},
+ {pool:'B',venue:'raydium',inputRaw:'100',outputRaw:'5000001',observedAt:t},0);
+ assert.equal(candidate.buyVenue,'raydium');
+ assert.equal(candidate.sellVenue,'raydium');
+ assert.equal(candidate.indicativeNetUsd,0.000001);
  assert.throws(()=>evaluateRoute(5,{pool:'A',venue:'raydium',inputRaw:'5000000',outputRaw:'100',observedAt:t},
- {pool:'B',venue:'raydium',inputRaw:'100',outputRaw:'5000001',observedAt:t},0));
+ {pool:'A',venue:'raydium',inputRaw:'100',outputRaw:'5000001',observedAt:t},0));
 });
 test('flag stale quote time gap',()=>{
  const result=evaluateRoute(5,{pool:'A',venue:'raydium',inputRaw:'5000000',outputRaw:'100',observedAt:t},
