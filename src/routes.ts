@@ -38,7 +38,7 @@ export function classifyPool(pool: DiscoveredPool): PoolCapability {
   return {
     address:pool.address,venue:pool.venue,program,
     ownerProgramMatchesVenue,
-    quoteStatus:program==='orca_whirlpool'||program==='raydium_amm_v4'?'indicative_supported':'not_implemented',
+    quoteStatus:program==='orca_whirlpool'||program==='raydium_amm_v4'||program==='raydium_clmm'?'indicative_supported':'not_implemented',
     liquidityUsd:pool.liquidityUsd
   };
 }
