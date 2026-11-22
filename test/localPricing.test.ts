@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {PublicKey,type AccountInfo,type Connection} from '@solana/web3.js';
 import {MarketDataFeed} from '../src/marketData.js';
-import {validateLocalComponents} from '../src/localWhirlpool.js';
+import {QuoteFailureGate,validateLocalComponents} from '../src/localWhirlpool.js';
 
 const start=Date.parse('2026-11-22T07:30:00Z');
 test('C2 rejects stale, future and slot-inconsistent pool/tick snapshots',()=>{
@@ -44,4 +44,33 @@ test('C2 accepts empty tick arrays only after a verified RPC null at a known slo
  assert.equal(feed.get(key)?.data[0],4);
  assert.equal(feed.snapshot().verifiedAbsentAccounts,0);
  await feed.stop();
+});
+
+test('C2 remembers one unquotable exact input only for its snapshot, then retries after a state change',()=>{
+ const gate=new QuoteFailureGate(),pool='test-whirlpool';
+ assert.equal(gate.blocked(pool,'USDC_TO_SOL',5000000n,'pool-slot-100:tick-a'),false);
+ assert.equal(gate.reject(pool,'USDC_TO_SOL',5000000n,'pool-slot-100:tick-a',
+  'insufficient_tick_array_traversal_for_input'),true);
+ assert.equal(gate.reject(pool,'USDC_TO_SOL',5000000n,'pool-slot-100:tick-a',
+  'same_error'),false,'duplicate should not inflate the unique error count');
+ assert.equal(gate.blocked(pool,'USDC_TO_SOL',5000000n,'pool-slot-100:tick-a'),true);
+ assert.equal(gate.blocked(pool,'USDC_TO_SOL',5000000n,'pool-slot-101:tick-b'),false,
+  'a newer changed pool/tick snapshot must be retried');
+ assert.equal(gate.reject(pool,'USDC_TO_SOL',5000000n,'pool-slot-101:tick-b',
+  'insufficient_tick_array_traversal_for_input'),true);
+ assert.equal(gate.summary().activeFailures,1);
+ assert.equal(gate.summary().skippedRecalculations,1);
+ assert.equal(gate.get(pool,'USDC_TO_SOL',5000000n)?.reason,
+  'insufficient_tick_array_traversal_for_input');
+ gate.recover(pool,'USDC_TO_SOL',5000000n);
+ assert.equal(gate.summary().activeFailures,0);
+});
+test('C2 failure gate isolates input size and direction on the same pool',()=>{
+ const gate=new QuoteFailureGate();
+ gate.reject('pool-a','USDC_TO_SOL',5000000n,'state-a','tick_traversal_exceeded');
+ assert.equal(gate.blocked('pool-a','USDC_TO_SOL',1000000n,'state-a'),false);
+ assert.equal(gate.blocked('pool-a','SOL_TO_USDC',5000000n,'state-a'),false);
+ assert.equal(gate.blocked('pool-b','USDC_TO_SOL',5000000n,'state-a'),false);
+ gate.clearPool('pool-a');
+ assert.equal(gate.summary().activeFailures,0);
 });
