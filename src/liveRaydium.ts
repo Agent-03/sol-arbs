@@ -39,6 +39,7 @@ export type LiveRaydiumSnapshot={
  */
 export class LiveRaydiumMonitor{
  private watched=new Map<string,WatchedPool>();
+ private lastAttachAttempts=new Map<string,number>();
  private quotes=new Map<string,AmmV4Quote[]>();
  private errors:string[]=[];
  private running=false;
@@ -152,6 +153,7 @@ export class LiveRaydiumMonitor{
  }
  private async attach(source:DiscoveredPool){
   if(!this.running||this.watched.has(source.address))return;
+  this.lastAttachAttempts.set(source.address,Date.now());
   const key=new PublicKey(source.address);
   const account=await this.connection.getAccountInfoAndContext(key,'confirmed');
   if(!account.value||account.value.owner.toBase58()!==RAYDIUM_AMM_V4)
@@ -227,6 +229,15 @@ export class LiveRaydiumMonitor{
      this.error(pool.address+': '+String(error));
      this.notify(pool,0,Date.now(),'reconcile');
     }
+   }
+   // Transient bootstrap failures must not permanently remove a quoteable
+   // pool. Retry missing subscriptions no more than once every 60 seconds.
+   for(const source of this.supported()){
+    if(!this.running)break;
+    if(this.watched.has(source.address))continue;
+    if(Date.now()-(this.lastAttachAttempts.get(source.address)??0)<60000)continue;
+    try{await this.attach(source);}
+    catch(error){this.error(source.address+': reattach failed: '+String(error));}
    }
   }finally{this.reconciling=false;}
  }
