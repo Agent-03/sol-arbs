@@ -52,3 +52,20 @@ Jupiter docs: https://developers.jup.ag/docs/swap
 - These changes have not been validated against the user's live Helius and Jupiter endpoints. Run `npm.cmd run build` and `npm.cmd test` locally and report errors.
 
 Next: exact pool decoders and owner checks, verified route-building, transaction simulation, and realistic failure/fee measurement **before** any live execution.
+
+
+## Phase B1 — Cross-DEX route topology (read-only)
+
+The scanner now identifies known pool program owners for Raydium AMM v4, Raydium CLMM, and Orca Whirlpool. It builds distinct **Raydium ↔ Orca SOL/USDC two-leg candidate routes** and supplies live pool-state slot ages and machine-readable rejection reasons.
+
+Open `http://127.0.0.1:8787/routes` to inspect:
+- `capabilities`: discovered pools, program owner matching and `not_implemented` swap-quoting status.
+- `candidates`: ordered two-pool routes for USDC → SOL → USDC, liquidity hints, slots and freshness.
+- `metrics`: candidate totals, rejected owner mismatches and stale pools.
+- `executableRoutes: 0`: **deliberate safety gate** until exact live swap adapters are implemented.
+
+Pool registry USD liquidity is indicative and not the same as current executable depth. A pool account owner matching a known program does not by itself prove the pool layout or route can execute. No profit predictions, wallets or transactions are produced by Phase B1.
+
+Reference constant-product BigInt math is included for isolated fixtures only. It is **not** connected to Raydium live pool accounts because Raydium AMM v4 requires effective vault-reserve reconstruction, on-chain fee parameters, and correct program-specific rounding. Orca and Raydium concentrated liquidity require full tick-array traversal, not a simplified midpoint or constant-product formula. See the [Orca swap API](https://orca-so.github.io/whirlpools/ts/functions/_orca-so_whirlpools.swapInstructions.html) and [Raydium SDK](https://github.com/raydium-io/raydium-sdk-V2).
+
+**To finish Phase B:** implement and validate program-specific state decoding, fee logic and exact token amount-out for both legs; use coherent pool-account and vault/tick snapshots; replay with realistic age/landing delays; journal candidate outcomes; and verify atomic transaction simulation. Phase B1 should not be represented as a profitable or executable arbitrage engine.
