@@ -933,3 +933,112 @@ Those DEX adapters require a separate protocol implementation before
 their pools can be evaluated with correct local exact-input math.
 No wallet signing, bundle submission or autonomous execution is
 introduced by this update.
+
+
+## C3D.2 — Cross-DEX pool mapping in the existing C3 wSOL graph
+
+C3D.2 enhances the **same** `C3GraphMonitor`, not a second scanner.
+The dynamic token universe remains anchored to wSOL, while a bounded,
+mint-indexed pool registry discovers potential cross-DEX connections.
+
+**Pool sources and identity validation**
+
+- The public DexScreener `/token-pairs/v1/solana/{mint}` endpoint proposes
+  pool addresses for selected SPL tokens. The pool URL, `dexId` and
+  estimated USD liquidity are **untrusted hints**, not executable quotes.
+- The dual-active Solana RPC reads each candidate's account in batches and
+  verifies its program owner. Only exact, on-chain matching mint pairs
+  enter the registry. Supported owners: Raydium AMM V4, CPMM, CLMM,
+  Orca Whirlpool, Meteora DLMM, DAMM v2, and PumpSwap AMM.
+- Raydium and Orca pool identities are decoded using existing
+  protocol adapters. The Meteora DLMM/DAMM-v2 and PumpSwap identity checks
+  use the on-chain account discriminators and canonical mint locations
+  from official protocol IDLs; PumpSwap also verifies the pool's PDA.
+  Unknown layouts, mismatched owners or mint pairs are discarded.
+- The registry remembers verified pools across rotating discovery windows
+  for `C3D2_REGISTRY_TTL_MS`. It drops pools if their tokens are no
+  longer part of the active verified mint universe.
+
+**Graph integration:** verified Raydium pool addresses are merged into the
+existing Raydium selection and on-chain-vault quote workflow. Verified
+Orca pools are supplied to the existing Whirlpool local tick-array
+monitor. Meteora DLMM/DAMM-v2 and PumpSwap are explicitly marked
+`unsupported` for exact-input quotes until the respective SDK math,
+required on-chain states and fees are added in C3D.4. Their
+DexScreener price/TVL is **never** used to fabricate graph cycles.
+
+**Coverage metrics:**
+
+- `tokensWithMultiplePools`: active verified SPL mints with two or
+  more distinct verified pool addresses
+- `crossDexPairs`: token/quote pairs with independently verified
+  pools on at least two different DEX venues
+- `potentialTwoLegPairs`: token/quote pairs with at least two
+  verified pool accounts, whether or not both are currently quotable
+- `readyTwoLegPairs`: token/quote pairs with at least two *locally
+  ready* pools. This is a structural count, not necessarily the same
+  as completed graph cycles after quote/depth/slot constraints
+- `perVenue` and `tokens[].pools[]`: exact program, mint pair,
+  verified slot, discovery TVL and reason an individual pool is
+  `ready`, `not_ready` or `unsupported`
+
+The radar's **Pool Coverage** tab now shows Raydium, Orca, Meteora and
+PumpSwap coverage, with token-level cross-DEX matching, searchable
+mint addresses, collapsible individual pool details and quote blockers.
+
+### Start and inspect C3D.2
+
+Keep your existing `.env` and optionally tune the new limits:
+
+```dotenv
+C3D2_REGISTRY_ENABLED=1
+C3D2_REGISTRY_TOKENS_PER_REFRESH=20
+C3D2_REGISTRY_CONCURRENCY=6
+C3D2_REGISTRY_MAX_POOLS=350
+C3D2_REGISTRY_TTL_MS=1200000
+C3D2_REGISTRY_MIN_LIQUIDITY_USD=2500
+```
+
+The same `RPC_DUAL_ACTIVE=1` / primary and secondary request budgets
+apply to Solana pool verification. The discovery URL is a **public
+third-party metadata API** with its own limits. It is not routed to
+Solana RPC providers and may throttle independently. Pool mapping
+stays bounded even when more SPL tokens are discovered.
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Open `http://127.0.0.1:8787/` and select **Pool Coverage**.
+
+```powershell
+$p = Invoke-RestMethod http://127.0.0.1:8787/api/c3/pools
+$p | Select-Object status,tokensQueried,apiCandidates,onchainVerified,
+  trackedPools,readyPools,tokensWithMultiplePools,crossDexPairs,
+  potentialTwoLegPairs,readyTwoLegPairs,unsupportedQuotePools | Format-List
+$p.perVenue | Format-List
+$p.tokens | Where-Object { $_.crossDexPairs -gt 0 } |
+  Select-Object -First 20 symbol,poolCount,venueCount,crossDexPairs,
+    readyTwoLegPairs,@{N='DEXs';E={$_.venues -join ','}} |
+  Format-Table -AutoSize
+$p.errors
+
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+$g.poolRegistry | Format-List
+$g | Select-Object baseAsset,trackedPools,eligiblePools,
+  twoLegCycles,threeLegCycles,positiveIndicative,bestIndicativeNetSol |
+  Format-List
+$r = Invoke-RestMethod http://127.0.0.1:8787/rpc
+$r | Select-Object mode,primaryAssigned,secondaryAssigned,peakInFlight |
+  Format-List
+```
+
+**Limitations:** This is pool discovery, owner/mint verification,
+matching and reuse of the already-supported Raydium/Orca quote math.
+It does not yet implement Meteora or PumpSwap swap quoting, atomic
+multi-pool account reads, transaction simulation, or execution.
+All graph cycles remain non-executable research observations.
