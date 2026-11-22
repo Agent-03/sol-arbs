@@ -72,6 +72,15 @@ test('C3D.4 local DLMM and Orca readiness diagnostics surface in the radar',()=>
   'Meteora DLMM local quote readiness','id="dlmmTable"',
   'id="healthDlmm"','DLMM SDK ready / mapped',
   'graph&&graph.dlmm','dlrows.map','Fresh local SDK quote state',
-  'LIVE · C3D.4'
+  'LIVE · C3D.4.1'
  ])assert.ok(explorerHtml.includes(term),'missing '+term);
+});
+
+test('C3D.4.1 radar exposes DLMM freshness, recovery and scheduler health',()=>{
+ for(const label of ['id="dlmmCadence"','id="dlmmChecks"',
+  'id="dlmmRecoveries"','id="dlmmOldest"','id="dlmmRefreshStatus"',
+  'dl.refreshConcurrency','dl.refreshBudget','dl.reasonCounts',
+  'p.oldestAgeMs','p.refreshFailures','LIVE · C3D.4.1']){
+  assert.ok(explorerHtml.includes(label),'C3D.4.1 missing '+label);
+ }
 });
