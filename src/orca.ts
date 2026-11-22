@@ -75,7 +75,8 @@ export class OrcaMonitor{
    private readonly onLeg?:()=>void,
    private readonly maxQuoteAgeMs=15000,
    private readonly getExtraBuys?:()=>Array<{pool:string;inputRaw:string;outputRaw:string;observedAt:string;slot:number|null}>,
-   private readonly quoteMode:'fast'|'full'='fast'){
+   private readonly quoteMode:'fast'|'full'='fast',
+   private readonly onFirstBuy?:()=>void){
   // Ephemeral, unused local signing identity required by legacy SDK provider.
   // This service NEVER signs or broadcasts transactions.
   const provider=new AnchorProvider(connection,new Wallet(Keypair.generate()),{commitment:'confirmed'});
@@ -166,7 +167,10 @@ export class OrcaMonitor{
      try{
       const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;
       buyCount++;
-      if(!firstBuyAt)firstBuyAt=Date.now();
+      if(!firstBuyAt){
+       firstBuyAt=Date.now();
+       try{this.onFirstBuy?.();}catch(error){this.addError(errors,'First buy sync callback',error);}
+      }
       legs.push(buy);this.publishLegs(buy);
       // Buy Orca, sell Raydium using each known Raydium pool's USDC-side output reserve.
       for(const ray of bySize.get(size)??[]){
