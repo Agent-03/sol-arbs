@@ -29,7 +29,9 @@ export function assessRoutes(
  rules:FreshnessRules,
  now=Date.now()
 ):RouteSummary{
- if(!Number.isFinite(now)||Object.values(rules).some(x=>!Number.isSafeInteger(x)||x<0))
+ if(!Number.isFinite(now)||
+    [rules.maxAgeMs,rules.maxGapMs,rules.maxSlotSkew].some(x=>!Number.isSafeInteger(x)||x<0)||
+    (rules.minLiquidityUsd!==undefined&&(!Number.isFinite(rules.minLiquidityUsd)||rules.minLiquidityUsd<0)))
    throw new Error('Invalid assessment timestamp or freshness rules');
  const assessed:AssessedRoute[]=candidates.map(candidate=>{
   const a=Date.parse(candidate.buyObservedAt);
@@ -49,7 +51,7 @@ export function assessRoutes(
    candidate.buyLiquidityUsd===undefined || candidate.sellLiquidityUsd===undefined
   ))freshnessReasons.push('unknown_pool_liquidity');
   else if(rules.minLiquidityUsd && (
-   candidate.buyLiquidityUsd! < rules.minLiquidityUsd || candidate.sellLiquidityUsd! < rules.minLiquidityUsd
+   (candidate.buyLiquidityUsd ?? 0) < rules.minLiquidityUsd || (candidate.sellLiquidityUsd ?? 0) < rules.minLiquidityUsd
   ))freshnessReasons.push('insufficient_pool_liquidity');
   if(slotGap===null)freshnessReasons.push('missing_pool_slot');
   else if(slotGap>rules.maxSlotSkew)freshnessReasons.push('pool_slot_skew_exceeded');
