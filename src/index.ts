@@ -18,6 +18,7 @@ async function main(){
  config.pools=discovered.pools.map(p=>new PublicKey(p.address));
  const routes=buildCandidates(discovered.pools);
  const ammV4=new AmmV4Monitor(validationConnection,discovered.pools,config.jupiter.sizesUsd);
+ await ammV4.scanOnce();
  ammV4.start();
  const orca=new OrcaMonitor(validationConnection,discovered.pools,config.jupiter.sizesUsd,()=>ammV4.snapshot().quotes,config.jupiter.assumedCostUsd);
  orca.start();
@@ -36,10 +37,10 @@ async function main(){
   }else if(path==='/discovery')res.end(JSON.stringify(discovered));
   else if(path==='/jupiter')res.end(JSON.stringify(jupiter.snapshot()));
   else if(path==='/amm-v4')res.end(JSON.stringify({...ammV4.snapshot(),note:'AMM v4 pool-level standalone indicative quotes only. No complete cross-DEX opportunity or executable transaction.'}));
-  else if(path==='/orca')res.end(JSON.stringify(orca.snapshot()));
+  else if(path==='/orca')res.end(JSON.stringify({...orca.snapshot(),raydiumQuoteStatus:ammV4.snapshot().status,raydiumQuoteCount:ammV4.snapshot().quotes.length,raydiumErrors:ammV4.snapshot().errors}));
   else if(path==='/arb'){
    const state=orca.snapshot();
-   res.end(JSON.stringify({status:state.status,updatedAt:state.lastUpdatedAt,indicativeRoutes:state.routeCandidates.length,executableRoutes:0,
+   res.end(JSON.stringify({status:state.status,updatedAt:state.lastUpdatedAt,indicativeRoutes:state.routeCandidates.length,executableRoutes:0,raydiumQuoteStatus:ammV4.snapshot().status,raydiumQuoteCount:ammV4.snapshot().quotes.length,raydiumErrors:ammV4.snapshot().errors,
     candidates:state.routeCandidates.sort((a,b)=>b.indicativeNetUsd-a.indicativeNetUsd).slice(0,100),errors:state.errors,
     warning:'Quote-only cross-venue estimates. Not executable; not atomic; fees/landing risk not verified.'}));
   }
