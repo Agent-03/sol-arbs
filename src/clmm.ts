@@ -22,6 +22,7 @@ export type ClmmHealth={
  errors:string[];perPool:Array<{pool:string;status:'fresh'|'expired'|'missing'|'refreshing';reason?:string;
    lastObservedAt?:string;ageMs?:number;tickArrays:number;slot?:number}>;
  scans:number;lastUpdatedAt?:string;
+ poolAccountEvents:number;selectiveScans:number;pendingDirtyPools:number;
 };
 
 export function isClmmPair(a:string,b:string):boolean{
@@ -50,6 +51,11 @@ export class ClmmMonitor {
  private scans=0;
  private refreshing?:string;
  private failures=new Map<string,string>();
+ private pendingDirty=new Set<string>();
+ private requestTimer?:ReturnType<typeof setTimeout>;
+ private dirtyEvents=0;
+ private selectiveScans=0;
+ private lastSelectiveAt=0;
 
  constructor(
   private readonly connection:Connection,
@@ -118,14 +124,15 @@ export class ClmmMonitor {
   }
   return quotes;
  }
- async scanOnce(){
+ async scanOnce(onlyPools?:ReadonlySet<string>){
   if(this.busy)return;
   this.busy=true;this.running=true;
   try{
    const sdk=await this.init();
    const epochInfo=await sdk.fetchEpochInfo();
-   const selected=this.chosen();
-   const valid=new Set(selected.map(p=>p.address));
+   const allSelected=this.chosen();
+   const selected=onlyPools?allSelected.filter(pool=>onlyPools.has(pool.address)):allSelected;
+   const valid=new Set(allSelected.map(p=>p.address));
    for(const pool of this.cache.keys())if(!valid.has(pool))this.cache.delete(pool);
    for(const pool of selected){
     this.refreshing=pool.address;
@@ -158,6 +165,28 @@ export class ClmmMonitor {
    this.errors=this.errors.slice(0,10);
   }finally{this.refreshing=undefined;this.busy=false;}
  }
+ requestPoolRefresh(address:string){
+  if(!this.running||!this.chosen().some(pool=>pool.address===address))return;
+  this.dirtyEvents++;
+  this.pendingDirty.add(address);
+  this.scheduleDirtyRefresh();
+ }
+ private scheduleDirtyRefresh(){
+  if(!this.running||this.requestTimer||!this.pendingDirty.size)return;
+  // These are still SDK/RPC tick-array reads, so coalesce bursts to
+  // avoid overloading the shared provider. C2 removes these hot-path reads.
+  const delay=Math.max(300,15000-(Date.now()-this.lastSelectiveAt));
+  this.requestTimer=setTimeout(()=>{
+   this.requestTimer=undefined;
+   if(!this.running)return;
+   if(this.busy){this.scheduleDirtyRefresh();return;}
+   const selected=new Set(this.pendingDirty);
+   this.pendingDirty.clear();
+   this.lastSelectiveAt=Date.now();
+   this.selectiveScans++;
+   void this.scanOnce(selected).finally(()=>this.scheduleDirtyRefresh());
+  },delay);
+ }
  start(){
   if(this.running)return;
   this.running=true;
@@ -168,7 +197,8 @@ export class ClmmMonitor {
   };
   void loop();
  }
- stop(){this.running=false;if(this.timer)clearTimeout(this.timer);}
+ stop(){this.running=false;if(this.timer)clearTimeout(this.timer);
+  if(this.requestTimer)clearTimeout(this.requestTimer);this.pendingDirty.clear();}
  snapshot():ClmmHealth{
   const now=Date.now();
   const selected=this.chosen();
@@ -183,6 +213,7 @@ export class ClmmMonitor {
   const quotes=this.getBuys();
   return {status:this.busy?'scanning':this.failures.size?'partial_error':'ok',
    selectedPools:selected.length,readyPools:perPool.filter(p=>p.status==='fresh').length,
-   quotes,errors:[...this.errors],perPool,scans:this.scans,lastUpdatedAt:this.lastUpdatedAt};
+   quotes,errors:[...this.errors],perPool,scans:this.scans,lastUpdatedAt:this.lastUpdatedAt,
+   poolAccountEvents:this.dirtyEvents,selectiveScans:this.selectiveScans,pendingDirtyPools:this.pendingDirty.size};
  }
 }
