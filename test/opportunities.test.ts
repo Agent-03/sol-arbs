@@ -50,3 +50,16 @@ test('handles no routes without fabricating profitability',()=>{
  assert.equal(x.bestComparableNetUsd,null);
  assert.equal(x.bestRawNetUsd,null);
 });
+
+test('low-liquidity candidates are excluded even when quotes are timely',()=>{
+ const q=route(now-1000,now-500,3,4,0.2);
+ const withLiquidity={...q,buyLiquidityUsd:200000,sellLiquidityUsd:1200};
+ const x=assessRoutes([withLiquidity],{...rules,minLiquidityUsd:10000},now);
+ assert.equal(x.comparable,0);
+ assert.equal(x.excludedByReason.insufficient_pool_liquidity,1);
+});
+test('unknown liquidity cannot be upgraded to a research-aligned route',()=>{
+ const x=assessRoutes([route(now-1000,now-500,3,4,0.2)],{...rules,minLiquidityUsd:10000},now);
+ assert.equal(x.comparable,0);
+ assert.equal(x.excludedByReason.unknown_pool_liquidity,1);
+});
