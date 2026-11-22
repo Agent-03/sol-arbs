@@ -111,7 +111,8 @@ export class MarketEngine {
    ()=>this.clmm.getBuys().map(q=>({pool:q.pool,inputRaw:q.inputRaw,
     outputRaw:q.outputRaw,observedAt:q.observedAt,slot:q.poolSlot})),
    config.b52OrcaQuoteMode,
-   ()=>this.requestRaydiumAlignment());
+   ()=>this.requestRaydiumAlignment(),
+   this.marketData,this.config.freshness.maxSlotSkew);
   this.note('info','startup','B5 read-only engine initialized. Raydium vaults: WebSocket state; Orca: SDK refreshes.');
  }
  private note(level:Activity['level'],kind:string,message:string){
@@ -455,6 +456,12 @@ export class MarketEngine {
     poolAccountEvents:cl.poolAccountEvents,selectiveScans:cl.selectiveScans,
     pendingDirtyPools:cl.pendingDirtyPools,
     lastUpdatedAt:cl.lastUpdatedAt,errors:cl.errors.slice(0,6)},
+   c2:{
+    orcaLocal:o.localPricing??null,
+    clmmLocal:{scans:cl.scans,quotesFromCachedSdkState:cl.quotes.length,
+     tickArraySlotsCoherent:false},
+    note:'Only fully cached Whirlpool states are priced without RPC. CLMM still needs RPC for tick-array snapshots; all results remain indicative.'
+   },
    orca:{status:o.status,poolCount:o.orcaPools,quotedLegs:o.quotedLegs.length,
     quoteState:o.quoteState,freshLegs:o.freshLegs,expiredLegs:o.expiredLegs,
     quoteMode:o.quoteMode,lastScanDurationMs:o.lastScanDurationMs,
