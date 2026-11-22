@@ -144,3 +144,28 @@ LOG_ACCOUNT_UPDATES=0
 ```
 
 These defaults are intended only for stable, read-only monitoring and diagnostic investigation; they are too slow to be used as a real-time execution system. Do not interpret delayed quotes as current market profits. If 429s persist, reduce `MAX_DISCOVERED_POOLS`, reduce quote sizes scanned or use a provider rate-limit tier that supports your observed RPC request load. Do **not** disable retries globally or bypass provider rate limits.
+
+
+## Shared RPC limiter and 429 diagnostics (Phase B3 hardening)
+
+If the terminal repeatedly shows `Server responded with 429 ... Retrying`, those warnings originate from the Solana Web3.js HTTP RPC client's automatic retry layer. We now avoid independently retrying every SDK caller:
+
+- **One shared `Connection`** is passed to pool discovery, Raydium, Orca/Anchor SDK, and the journal scanner, configured with a **single-flight** HTTP `fetch` limiter.
+- The limiter spaces RPC starts (default 1000 ms), bounds 429 retries (default 2 retries / 3 attempts total), respects `Retry-After` responses, and serializes HTTP calls. Web3.js automatic 429 retries are disabled for this shared connection.
+- Status is available at `http://127.0.0.1:8787/rpc`; `/health` and `/arb` also include `rpc` diagnostic counters (HTTP calls, attempts, rate limits, retry attempts, transport errors, and any active cooldown).
+- A duplicate Raydium startup scan was removed. The initial Raydium quote pass is performed once, to seed the Orca cycle.
+- The optional Raydium pool-to-vault slot tolerance is explicitly configurable. The default of 12 slots accommodates request pacing but **decreases quote coherence**; these remain indicative quotes only and must never be promoted to execution signals.
+
+Defaults (add to an existing local `.env` if you need custom values; otherwise defaults apply):
+
+```dotenv
+RPC_HTTP_MIN_SPACING_MS=1000
+RPC_HTTP_MAX_RETRIES=2
+RPC_HTTP_429_BACKOFF_MS=5000
+RPC_HTTP_429_MAX_BACKOFF_MS=60000
+AMM_V4_MAX_SLOT_SKEW=12
+```
+
+A free or low-tier RPC plan may still reject reads after the limit is applied. If `/rpc` reports continuing rate limits, try `RPC_HTTP_MIN_SPACING_MS=2000` and reduce `MAX_DISCOVERED_POOLS`. **The limiter intentionally slows down the monitor: it is a diagnostic solution, not a high-frequency arbitrage execution architecture.**
+
+A GitHub Actions workflow now runs `npm install`, `npm run build` and `npm test` on pushes to `main` and pull requests, using Node 22. This is not a substitute for live mainnet testing against your RPC plan.
