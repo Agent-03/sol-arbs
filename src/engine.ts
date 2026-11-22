@@ -60,6 +60,8 @@ export class MarketEngine {
  private readonly pendingOrcaPools=new Set<string>();
  private lastFullOrcaRefreshAt=0;
  private selectiveOrcaRefreshes=0;
+ private lastSyncReconcileAt=0;
+ private syncReconcilesRequested=0;
  private latencySamples:number[]=[];
  private lastEvaluationAt?:string;
  private lastEventAt?:string;
@@ -99,12 +101,23 @@ export class MarketEngine {
    config.freshness.maxAgeMs,
    ()=>this.clmm.getBuys().map(q=>({pool:q.pool,inputRaw:q.inputRaw,
     outputRaw:q.outputRaw,observedAt:q.observedAt,slot:q.poolSlot})),
-   config.b52OrcaQuoteMode);
+   config.b52OrcaQuoteMode,
+   ()=>this.requestRaydiumAlignment());
   this.note('info','startup','B5 read-only engine initialized. Raydium vaults: WebSocket state; Orca: SDK refreshes.');
  }
  private note(level:Activity['level'],kind:string,message:string){
   this.events.unshift({id:++this.eventId,at:new Date().toISOString(),level,kind,message});
   this.events=this.events.slice(0,24);
+ }
+ private requestRaydiumAlignment(){
+  // A new Orca buy quote has arrived. Re-read Raydium in one pool/vault
+  // RPC context only occasionally, avoiding a stale unchanged reserve
+  // timestamp while still honoring the global request limiter.
+  const now=Date.now();
+  if(!this.running||now-this.lastSyncReconcileAt<12000)return;
+  this.lastSyncReconcileAt=now;
+  this.syncReconcilesRequested++;
+  void this.ray.reconcileAll();
  }
  private readonly minManualScanMs=30000;
  private readonly minManualDiscoveryMs=120000;
@@ -369,6 +382,7 @@ export class MarketEngine {
     localEvaluations:this.localEvaluations,eventEvaluations:this.marketEventEvaluations,
     orcaEventTriggers:this.orcaTriggers,coalescedTriggers:this.suppressedTriggers,
     selectiveOrcaRefreshes:this.selectiveOrcaRefreshes,pendingOrcaPools:this.pendingOrcaPools.size,
+    requestedRaydiumSyncReads:this.syncReconcilesRequested,
     lastMarketEventAt:this.lastEventAt,lastEvaluationAt:this.lastEvaluationAt,
     lastEvaluationSource:this.lastSource,wsSubscriptions:r.subscriptions,
     raydiumReadyPools:r.readyPools,raydiumTrackedPools:r.poolCount,
