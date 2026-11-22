@@ -13,9 +13,10 @@ const MINT_TO_ASSET=new Map(Object.entries(GRAPH_ASSETS).map(([name,token])=>[to
 export const assetOfMint=(mint:string):GraphAsset|undefined=>MINT_TO_ASSET.get(mint);
 
 export type GraphPool={
- address:string;program:'raydium_amm_v4'|'raydium_cpmm';tokenA:GraphAsset;tokenB:GraphAsset;
+ address:string;program:'raydium_amm_v4'|'raydium_cpmm'|'orca_whirlpool'|'raydium_clmm';tokenA:GraphAsset;tokenB:GraphAsset;
  reserveA:string;reserveB:string;feeNumerator:string;feeDenominator:string;
  creatorFeeRate?:string;creatorFeeOn?:0|1|2;
+ quoteExactInput?:(from:GraphAsset,raw:bigint)=>bigint|null;
  observedAt:string;poolSlot:number;vaultSlot:number;liquidityUsd:number|null;
  // Exact-byte coherence across all 3 accounts is not established by 12-slot tolerance.
  snapshotIntegrity:'bounded_slot_research';
@@ -39,7 +40,7 @@ export type GraphScanLimits={
  maxPoolInputShareBps?:number;
 };
 export type GraphEvaluation={
- phase:'C3B';mode:'READ_ONLY';evaluatedAt:string;
+ phase:'C3C';mode:'READ_ONLY';evaluatedAt:string;
  elapsedMs:number;poolCount:number;eligiblePools:number;stalePools:number;
  pathChecks:number;depthRejected:number;truncated:boolean;
  twoLegChecks:number;threeLegChecks:number;
@@ -48,7 +49,8 @@ export type GraphEvaluation={
  limitations:string[];
 };
 const LIMITATIONS=[
- 'Raydium AMM V4 and CPMM pool-vault research math; no Orca/CLMM/Meteora routes in this C3 graph.',
+ 'Raydium V4/CPMM and cached Orca Whirlpool/Raydium CLMM SDK exact-input quotes; Meteora not yet covered.',
+ 'CLMM quotes require complete fresh tick arrays; no mid-price approximation or unverified execution.',
  'Independent WebSocket account observations are not same-slot atomic snapshots.',
  'Fees, Jito tips and execution landing are estimates or unknown; a positive route is not executable profit.',
  'Historical replay, transaction simulation and actual swap execution are NOT enabled.'
@@ -89,7 +91,9 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
   try{
    const ra=BigInt(pool.reserveA),rb=BigInt(pool.reserveB);
    const fn=BigInt(pool.feeNumerator),fd=BigInt(pool.feeDenominator);
-   if(ra<=0n||rb<=0n||fn<0n||fd<=0n||fn>=fd)throw new Error('invalid reserves');
+   const concentrated=pool.program==='orca_whirlpool'||pool.program==='raydium_clmm';
+   if((!concentrated&&(ra<=0n||rb<=0n))||fn<0n||fd<=0n||fn>=fd||
+      (concentrated&&typeof pool.quoteExactInput!=='function'))throw new Error('invalid model');
    const a:Edge={pool,from:pool.tokenA,to:pool.tokenB,reserveIn:ra,reserveOut:rb,feeNum:fn,feeDen:fd};
    const b:Edge={...a,from:pool.tokenB,to:pool.tokenA,reserveIn:rb,reserveOut:ra};
    edges.set(a.from,[...(edges.get(a.from)??[]),a]);
@@ -117,13 +121,17 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
    pathChecks++;
    const n=depth+1;
    if(limits.maxPoolInputShareBps!==undefined&&
-      raw*10000n>edge.reserveIn*BigInt(limits.maxPoolInputShareBps)){
+      ((edge.pool.program==='orca_whirlpool'||edge.pool.program==='raydium_clmm')
+       ?(edge.pool.liquidityUsd===null||sizeUsd*10000>edge.pool.liquidityUsd*limits.maxPoolInputShareBps)
+       :raw*10000n>edge.reserveIn*BigInt(limits.maxPoolInputShareBps))){
     depthRejected++;continue;
    }
    if(n===2)twoLegChecks++;
    if(n===3)threeLegChecks++;
    let output:bigint;
-   try{output=edge.pool.program==='raydium_cpmm'
+   try{output=edge.pool.program==='orca_whirlpool'||edge.pool.program==='raydium_clmm'
+     ?(edge.pool.quoteExactInput?.(edge.from,raw)??0n)
+     :edge.pool.program==='raydium_cpmm'
      ?cpmmAmountOut(raw,edge.reserveIn,edge.reserveOut,
        edge.feeNum,BigInt(edge.pool.creatorFeeRate??'-1'),
        edge.pool.creatorFeeOn??-1 as 0|1|2,
@@ -178,7 +186,7 @@ export function evaluateGraphCycles(pools:readonly GraphPool[],limits:GraphScanL
  }
  candidates.sort((a,b)=>b.indicativeNetUsd-a.indicativeNetUsd||
   a.id.localeCompare(b.id));
- return {phase:'C3B',mode:'READ_ONLY',evaluatedAt:new Date(now).toISOString(),
+ return {phase:'C3C',mode:'READ_ONLY',evaluatedAt:new Date(now).toISOString(),
   elapsedMs:Date.now()-started,poolCount:unique.size,eligiblePools,stalePools,
   pathChecks,depthRejected,truncated,twoLegChecks,threeLegChecks,
   twoLegCycles,threeLegCycles,positiveIndicative,

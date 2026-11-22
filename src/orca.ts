@@ -134,7 +134,7 @@ export class OrcaMonitor{
   */
  quoteLocalExact(pool:string,direction:'USDC_TO_SOL'|'SOL_TO_USDC',amountRaw:bigint):OrcaQuote|null{
   const q=this.local?.quoteExact(pool,direction,amountRaw);
-  return q?{...q,classification:'indicative_non_executable'}:null;
+  return q?{...q,direction,classification:'indicative_non_executable'}:null;
  }
  requestReferenceValidation():{accepted:boolean;message:string}{
   const reject=(message:string)=>{
@@ -217,7 +217,7 @@ export class OrcaMonitor{
   for(const size of this.sizesUsd){
    const amount=BigInt(Math.round(size*1e6));
    const q=this.local.quoteExact(pool,'USDC_TO_SOL',amount);
-   if(q)legs.push({...q,classification:'indicative_non_executable'});
+   if(q)legs.push({...q,direction:'USDC_TO_SOL',classification:'indicative_non_executable'});
   }
   if(!legs.length){
    // A newer pool/tick update has invalidated last-known pricing. Preserve
@@ -251,7 +251,7 @@ export class OrcaMonitor{
  private async quote(poolAddress:string,pool:Whirlpool|null,poolSlot:number,poolObservedAt:string,direction:'USDC_TO_SOL'|'SOL_TO_USDC',inputRaw:bigint,refreshTicks:boolean):Promise<OrcaQuote>{
   if(inputRaw<=0n)throw new Error('Invalid quote amount');
   const local=this.local?.quoteExact(poolAddress,direction,inputRaw);
-  if(local)return {...local,classification:'indicative_non_executable'};
+  if(local)return {...local,direction,classification:'indicative_non_executable'};
   if(this.local?.isKnownUnquotable(poolAddress,direction,inputRaw))
    throw new Error('C2 exact-input quote unavailable within covered tick-array range');
   if(!pool)throw new Error('Local pool state unavailable and SDK fallback not initialized');

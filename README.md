@@ -742,3 +742,48 @@ Raydium official cp-swap on-chain PoolState and AmmConfig source
 (`raydium-io/raydium-cp-swap`) and Raydium CPMM fee docs. Independent
 RPC/SDK quote comparison and complete transaction simulation remain
 required before relying on any positive P&L estimate.
+
+
+## Phase C3C — Multi-token concentrated-liquidity research (Orca + Raydium)
+
+C3C extends the **read-only** C3 USDC-rooted two-hop and three-hop graph to
+Orca Whirlpool and Raydium CLMM pools alongside Raydium AMM V4 and CPMM.
+Supported whitelist: `USDC`, `SOL`, `USDT`, `JUP`. There is no trade
+execution, wallet signing, Jito submission or flashloan support.
+
+- Discovery checks actual program ownership and on-chain mint addresses.
+  Raydium CLMM candidates come from the same six-pair Raydium discovery API;
+  Orca pools come from the Orca public pool registry and are independently
+  validated on chain. Discovery metadata is **not** a trusted price.
+- Exact-input concentrated quotes use existing Orca and Raydium SDK tick-array
+  math. A missing/uninitialized required tick array, outdated snapshot,
+  invalid owner, stale slot context, unknown token program or SDK error yields
+  **no route**, rather than an invented price or linear spot estimate.
+- C3C owns isolated account-cache dependencies and pool refreshes, leaving
+  B5/C2 SOL/USDC monitoring unchanged. The graph's existing `C3_GRAPH_*`
+  configuration controls whitelist discovery, per-pair budgets, refresh and
+  route searches. C3C separately caps CLMM SDK bootstrap to six pools because
+  concentrated liquidity needs additional RPC tick/config reads.
+- For a concentrated pool with no meaningful constant-product input reserve,
+  the `C3_GRAPH_MAX_POOL_INPUT_BPS` depth gate uses API TVL as a *coarse USD
+  participation limit*. This is less precise than the V4/CPMM raw-reserve
+  gate; SDK tick traversal is still authoritative for full-input feasibility.
+- `GET /api/c3/graph` includes `concentrated.trackedOrca`,
+  `concentrated.trackedClmm`, `readyOrca`, `readyClmm`,
+  `validatedOrca`, `validatedClmm`, `quotesAttempted`, `quoteMisses`,
+  and `discoveryErrors`. The graph cycle `hops[].program` identifies
+  `orca_whirlpool` and `raydium_clmm` where applicable.
+
+Check the new graph after bootstrap (a new PowerShell session):
+
+```powershell
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+$g.concentrated | Format-List
+$g | Select-Object status,trackedPools,eligiblePools,stalePools,twoLegCycles,threeLegCycles,positiveIndicative,bestIndicativeNetUsd | Format-List
+$g.candidates | Select-Object -First 12 legs,sizeUsd,indicativeNetUsd,@{N='Route';E={$_.tokenPath -join ' -> '}},@{N='DEX';E={$_.hops.program -join ' -> '}} | Format-Table -AutoSize
+$g.errors
+```
+
+A positive `indicativeNetUsd` is **not** realized or executable profit.
+There is no same-slot atomic multi-pool snapshot, transaction simulation,
+precise landing-cost model, confirmed fill, or independently verified P&L.
