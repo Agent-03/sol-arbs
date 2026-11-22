@@ -5,8 +5,7 @@ import type {BinArrayAccount} from '@meteora-ag/dlmm';
 // Published SDK ESM entry cannot load its Anchor CommonJS directory imports
 // under NodeNext. Resolve the package's supported CommonJS entry explicitly.
 // Its CJS export is the DLMM class itself, not {default: DLMM}.
-const DLMM=createRequire(import.meta.url)('@meteora-ag/dlmm')
- as typeof MeteoraTypes.default.default;
+const DLMM=createRequire(import.meta.url)('@meteora-ag/dlmm') as typeof MeteoraTypes.default.default;
 type DLMM=InstanceType<typeof MeteoraTypes.default.default>;
 import BN from 'bn.js';
 import {METEORA_DLMM,type RegistryPool} from './c3PoolRegistry.js';
