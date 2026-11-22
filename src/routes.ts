@@ -20,7 +20,7 @@ export type PoolCapability = {
   venue: DiscoveredPool['venue'];
   program: VenueProgram;
   ownerProgramMatchesVenue: boolean;
-  quoteStatus: 'not_implemented';
+  quoteStatus: 'indicative_supported' | 'not_implemented';
   liquidityUsd?: number;
 };
 
@@ -38,7 +38,7 @@ export function classifyPool(pool: DiscoveredPool): PoolCapability {
   return {
     address:pool.address,venue:pool.venue,program,
     ownerProgramMatchesVenue,
-    quoteStatus:'not_implemented',
+    quoteStatus:program==='orca_whirlpool'||program==='raydium_amm_v4'?'indicative_supported':'not_implemented',
     liquidityUsd:pool.liquidityUsd
   };
 }
