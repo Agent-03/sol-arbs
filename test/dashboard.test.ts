@@ -11,7 +11,8 @@ test('live dashboard inline JavaScript parses successfully',()=>{
 test('dashboard exposes core monitoring controls and real backend routes',()=>{
  for(const item of ['id="scan-btn"','id="discover-btn"','/api/dashboard','/api/actions/',
   'Excluded','Live detection engine','RPC network','Local evaluation history',
-  'Usable market coverage','Pool eligibility','orca-continuity','coverage-complete','clmm-state','orca-mode','orca-timing','Fast diagnostic']){
+  'Usable market coverage','Pool eligibility','orca-continuity','coverage-complete','clmm-state','orca-mode','orca-timing','Fast diagnostic',
+  'Phase C1','id="c1-watched"','id="c1-ws"','id="c1-ready"','/api/market-data']){
   assert.ok(dashboardHtml.includes(item),'missing '+item);
  }
 });
