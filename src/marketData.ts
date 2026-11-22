@@ -61,6 +61,7 @@ export class MarketDataFeed{
    owners.add(pool);this.reverseDeps.set(address,owners);
   }
  }
+ hasDependencies(pool:string):boolean{return this.poolDeps.has(pool);}
  clearDependencies(pool:string){
   const previous=this.poolDeps.get(pool);
   if(!previous)return;
@@ -122,7 +123,7 @@ export class MarketDataFeed{
  watch(address:string):()=>void{
   if(this.stopped)throw new Error('Market data feed stopped');
   const known=this.subscriptions.get(address);
-  if(known){known.count++;return ()=>this.unwatch(address);}
+  if(known){known.count++;let released=false;return ()=>{if(released)return;released=true;this.unwatch(address);};}
   const key=new PublicKey(address);
   const id=this.connection.onAccountChange(key,(info,context)=>{
    this.ingest(address,info,context.slot,'websocket',Date.now());
