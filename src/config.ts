@@ -9,7 +9,7 @@ export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;po
  c3GraphEnabled:boolean;c3GraphMaxPools:number;c3GraphPerPair:number;
  c3GraphRefreshMs:number;c3GraphReconcileMs:number;
  c3GraphMaxPathChecks:number;c3GraphMaxResults:number;
- c3GraphMinLiquidityUsd:number;c3GraphSizesUsd:number[];
+ c3GraphMinLiquidityUsd:number;c3GraphSizesUsd:number[];c3GraphMaxPoolInputBps:number;
  jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
@@ -69,13 +69,18 @@ export function loadConfig():Config{
    if(value!=='0'&&value!=='1')throw new Error('C3_GRAPH_ENABLED must be 0 or 1');
    return value==='1';
   })(),
-  c3GraphMaxPools:positiveInteger('C3_GRAPH_MAX_POOLS',18),
-  c3GraphPerPair:positiveInteger('C3_GRAPH_PER_PAIR',3),
+  c3GraphMaxPools:positiveInteger('C3_GRAPH_MAX_POOLS',24),
+  c3GraphPerPair:positiveInteger('C3_GRAPH_PER_PAIR',6),
   c3GraphRefreshMs:positiveInteger('C3_GRAPH_REFRESH_MS',600000),
   c3GraphReconcileMs:positiveInteger('C3_GRAPH_RECONCILE_MS',15000),
   c3GraphMaxPathChecks:positiveInteger('C3_GRAPH_MAX_PATH_CHECKS',10000),
   c3GraphMaxResults:positiveInteger('C3_GRAPH_MAX_RESULTS',50),
   c3GraphMinLiquidityUsd:nonNegativeNumber('C3_GRAPH_MIN_LIQUIDITY_USD',50000),
+  c3GraphMaxPoolInputBps:(()=>{
+   const n=positiveInteger('C3_GRAPH_MAX_POOL_INPUT_BPS',500);
+   if(n>10000)throw new Error('C3_GRAPH_MAX_POOL_INPUT_BPS must be <=10000');
+   return n;
+  })(),
   c3GraphSizesUsd:sizes('C3_GRAPH_SIZES_USD','500,2500,5000'),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
