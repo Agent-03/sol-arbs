@@ -673,3 +673,72 @@ $d.opportunities | Select-Object total,comparable,positive,bestComparableNetUsd 
 ```
 
 Tuning: The default graph uses `C3_GRAPH_MAX_POOLS=18` and `C3_GRAPH_RECONCILE_MS=15000`. Start with this budget before increasing pools; the same Helius RPC and WebSocket provider is shared with the existing scanner, and more subscriptions can worsen delivery or rate limits. Use `C3_GRAPH_ENABLED=0` to disable the graph without affecting C2. The full parameter list is in `.env.example`.
+
+
+## Phase C3B.1 — Raydium CPMM + safe depth-aware route expansion
+
+C3B.1 adds **Raydium CPMM** to the C3B live multi-token graph alongside
+Raydium AMM V4. The original B5/C2 Orca and Raydium CLMM SOL/USDC engine
+continues operating independently. C3B.1 does **not** yet route multi-token
+Orca Whirlpool, Raydium CLMM, Meteora or CEX order books into the same graph.
+
+- Raydium six-pair discovery now validates BOTH V4 and CPMM on-chain pool
+  account owners before selecting the pool universe; `C3_GRAPH_PER_PAIR=6`
+  and `C3_GRAPH_MAX_POOLS=24` by default, with hard bounded budgets.
+  Discovering 11 API candidates does not guarantee 11 quotable pools.
+- CPMM reads the 637-byte Anchor `PoolState`, two SPL vaults and the
+  **236-byte fee config account**. Its active trade fee and optional creator
+  fee are read from the on-chain config, not from a fixed assumed percentage.
+  Effective reserves deduct accrued protocol, fund and creator fees.
+  A creator fee charged on input vs output affects exact-input integer math.
+  Pools with unknown layout, paused swaps, uninitialized/future swaps,
+  Token-2022 vaults or missing/stale config state are excluded.
+- Pool, vault and fee-config accounts are watched through the deduplicated C1
+  WebSocket cache; a changed fee config triggers a new local calculation.
+  Bounded RPC batch reconciliation fills missed updates but **does not**
+  request a separate HTTP quote for every potential route.
+- Each hop now has an explicit **input reserve-depth gate**:
+  `C3_GRAPH_MAX_POOL_INPUT_BPS=500` rejects sizes consuming more than
+  **5% of that pool's effective INPUT reserve**, regardless of API TVL.
+  This is a conservative *heuristic*, not an execution guarantee.
+  It can reject a $5,000 route while retaining a smaller $500 route.
+- `GET /api/c3/graph` now includes
+  `discoveryStats.validatedCpmm`, `depthRejected`, and per-hop
+  `hops[].program` values (`raydium_amm_v4` / `raydium_cpmm`).
+  The explorer **Multi-hop Radar** tab shows DEX types and exclusions.
+
+### Quick inspection
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Run in another terminal after discovery:
+
+```powershell
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+$g | Select-Object status,trackedPools,eligiblePools,stalePools,twoLegCycles,threeLegCycles,pathChecks,depthRejected,positiveIndicative,elapsedMs | Format-List
+$g.discoveryStats | Format-List
+$g.candidates | Select-Object -First 12 legs,sizeUsd,indicativeNetUsd,@{N='Route';E={$_.tokenPath -join ' -> '}},@{N='DEX';E={$_.hops.program -join ' -> '}} | Format-Table -AutoSize
+$g.errors
+```
+
+Local C3B.1 tests cover on-chain binary layouts and discriminators, wrong
+owners, effective reserve accounting, input/output creator fees, exact output
+chaining, pool-depth exclusion, independent V4/CPMM routes and a mocked
+fee-config WebSocket update with no incremental HTTP quote call.
+
+**No profits are verified**: the V4 reserve approximation excludes some
+OpenBook inventory, independent account updates are not atomic, exact
+transport/landing fees and tips remain unknown, and no wallet or
+transaction-broadcast capability is enabled.
+
+Reference for CPMM account structure and changing fee semantics:
+Raydium official cp-swap on-chain PoolState and AmmConfig source
+(`raydium-io/raydium-cp-swap`) and Raydium CPMM fee docs. Independent
+RPC/SDK quote comparison and complete transaction simulation remain
+required before relying on any positive P&L estimate.
