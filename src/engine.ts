@@ -41,6 +41,8 @@ export class MarketEngine {
  private histories:History[]=[];
  private eventId=0;
  private lastNetPositive=false;
+ private previousRateLimits=0;
+ private previousFailovers=0;
 
  constructor(
   private readonly conn:Connection,
@@ -131,7 +133,7 @@ export class MarketEngine {
   this.busy='discovering';
   this.lastDiscoveryAttempt=Date.now();
   this.lastDiscoveryReason=reason;
-  this.note('info','discovery',reason==='manual'?'Manual pool discovery started':'Scheduled SOL/USDC pool discovery started');
+  this.note('info','discovery',reason==='manual'?'Manual pool discovery started':reason==='no_fresh_profitable_routes'?'No positive comparable routes; checking a wider SOL/USDC pool universe':'Scheduled SOL/USDC pool discovery started');
   // rotate secondary quote-supported pools when their full universe has more
   // than the active per-venue cap; keep the highest-liquidity anchors.
   const result=await discoverPools(this.conn,this.manualPools,this.config.maxPools,this.discoveryRuns);
@@ -183,6 +185,16 @@ export class MarketEngine {
    this.histories.push({at:this.lastScanAt,comparable:x.comparable,positive:x.positiveComparable,
     excluded:x.excluded,bestNetUsd:x.bestComparableNetUsd,total:x.total});
    this.histories=this.histories.slice(-48);
+   const network=this.rpc.snapshot();
+   const rateLimits=(network.primary.rateLimits??0)+(network.secondary?.rateLimits??0);
+   if(rateLimits>this.previousRateLimits){
+    this.note('warning','rpc','Provider rate limits increased by '+(rateLimits-this.previousRateLimits)+' during quote monitoring');
+   }
+   if(network.failovers>this.previousFailovers){
+    this.note('info','rpc',(network.failovers-this.previousFailovers)+' HTTP request(s) sent to the backup provider');
+   }
+   this.previousRateLimits=rateLimits;
+   this.previousFailovers=network.failovers;
    if(x.positiveComparable>0){
     this.note('success','scan',x.positiveComparable+' positive research-only comparisons; all remain non-executable');
    }else if(!x.total){
