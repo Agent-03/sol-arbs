@@ -22,7 +22,7 @@ export type ClmmHealth={
  errors:string[];perPool:Array<{pool:string;status:'fresh'|'expired'|'missing'|'refreshing';reason?:string;
    lastObservedAt?:string;ageMs?:number;tickArrays:number;slot?:number}>;
  scans:number;lastUpdatedAt?:string;
- poolAccountEvents:number;selectiveScans:number;pendingDirtyPools:number;
+ poolAccountEvents?:number;selectiveScans?:number;pendingDirtyPools?:number;
 };
 
 export function isClmmPair(a:string,b:string):boolean{
