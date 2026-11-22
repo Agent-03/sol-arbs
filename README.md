@@ -513,3 +513,57 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/actions/validate
 ```
 
 **C2 success criteria for the live test:** at least one Whirlpool or CLMM pool with all needed, slot-bounded account dependencies; growing offline quote counts without a corresponding RPC request per calculation; reference comparisons annotated with exact output deltas; and unaltered quote-age and slot rejection rules. A passing build/test suite only establishes fixture correctness. Real throughput and profitability remain **unproven** until live diagnostics and economic testing.
+
+
+## C2.1 — unquotable Whirlpool inputs and SDK validation acknowledgement
+
+Field observation: one Whirlpool repeatedly returned `Swap input value traversed too many arrays`, while `POST /api/actions/validate` returned `accepted: true` even though `referenceValidation.checks` stayed at zero. One route was freshness-qualified but had negative estimated net; this is **not** proof of pricing accuracy or realized profit.
+
+Fixes:
+- Deterministic tick-array traversal failures now count as **unquotable exact-input sizes**, not repeated local code errors. The local calculator remembers the failing pool/direction/input for identical *pool and tick account bytes*, skips repeat attempts, and automatically retries after relevant account bytes change. The memo is bounded to 512 entries. Diagnostics expose `activeUnquotableSizes`, `skippedUnquotableRecomputations`, and `unquotableQuotes` under `c2.orcaLocal`.
+- Newer pool/tick observations that cannot be priced **invalidate** the previous Orca quote for research purposes. The quote remains displayed as an **Invalidated** last-known observation in the explorer, but the engine and route combiner filter it out. Pool coverage shows the exclusion reason.
+- `POST /api/actions/validate` now returns `accepted: true` only if the Orca monitor actually started the independent SDK/RPC comparison. Busy scans and no usable exact-input pool return `accepted: false` with an explanation, without consuming the 60s cooldown. `/api/c2.referenceValidation` exposes `running`, `requests`, `rejectedRequests`, `lastRejection`, `checks` and `last`. An in-progress check can initially have `checks: 0` while `running: true`; that is expected.
+- The accepted check still compares **independent** SDK/RPC snapshots and is not executable-route validation. Don't claim a same-slot result unless all relevant component slots are observed and reconciled.
+
+Windows PowerShell diagnostics:
+
+```powershell
+git pull origin main
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Open a second PowerShell window:
+
+```powershell
+$d = Invoke-RestMethod http://127.0.0.1:8787/api/dashboard
+$d.c2.orcaLocal | Select-Object readyPools,localCalculations,localErrors,activeUnquotableSizes,skippedUnquotableRecomputations | Format-List
+$d.c2.orcaLocal.unquotableQuotes | Select-Object pool,direction,inputRaw,reason,skipCount | Format-Table -AutoSize
+$d.orca | Select-Object invalidatedPools,skippedUnquotablePools
+$d.b5 | Select-Object quoteMode,activeSizesUsd
+$d.opportunities.comparableRoutes | Select-Object sizeUsd,inputUsdcRaw,outputUsdcRaw,grossUsd,assumedCostUsd,indicativeNetUsd,buyPool,sellPool,raydiumModel,quoteAgeMs,slotGap | Format-List
+```
+
+Request an optional SDK parity check **when the Orca scanner is idle**:
+
+```powershell
+try {
+ $result = Invoke-RestMethod -Method Post http://127.0.0.1:8787/api/actions/validate
+ $result | Format-List
+ if($result.accepted) {
+  for($i=0; $i -lt 45; $i++) {
+   Start-Sleep -Seconds 2
+   $status = (Invoke-RestMethod http://127.0.0.1:8787/api/c2).referenceValidation
+   if(-not $status.running){ break }
+  }
+  $status | Select-Object requests,rejectedRequests,checks,matches,mismatches,inconclusive,lastRejection | Format-List
+  $status.last | Format-List
+ }
+} catch {
+ $_.Exception.Message
+ (Invoke-RestMethod http://127.0.0.1:8787/api/c2).referenceValidation | Format-List
+}
+```
+
+If the selected trade size is larger than the pool's viable tick-array traversal, **do not lower the liquidity, timestamp, or slot safeguards** to manufacture a trade. Choose another pool or evaluate a smaller exact input as a separate research experiment. An SDK result with different tick-array slots remains inconclusive even when raw outputs happen to match.
