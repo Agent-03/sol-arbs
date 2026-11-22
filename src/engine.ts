@@ -1,22 +1,25 @@
 import {PublicKey,type Connection} from '@solana/web3.js';
 import {discoverPools,type DiscoveredPool} from './discovery.js';
-import {AmmV4Monitor} from './ammV4.js';
-import {OrcaMonitor} from './orca.js';
+import {LiveRaydiumMonitor,type LiveRaydiumEvent} from './liveRaydium.js';
+import {OrcaMonitor,type ArbitrageCandidate} from './orca.js';
+import {combineLiveQuotes,type LiveCombination} from './liveRoutes.js';
 import {buildCandidates,RAYDIUM_AMM_V4,ORCA_WHIRLPOOL,RAYDIUM_CLMM} from './routes.js';
 import {assessRoutes,type RouteSummary} from './opportunities.js';
-import {Scanner} from './scanner.js';
+import {Scanner,type PoolChange} from './scanner.js';
 import type {Config} from './config.js';
 import type {RpcProviderPool} from './rpcFailover.js';
 import type {JupiterMonitor} from './jupiter.js';
 
 type Activity={id:number;at:string;level:'info'|'success'|'warning';kind:string;message:string};
 type History={at:string;comparable:number;positive:number;excluded:number;bestNetUsd:number|null;total:number};
-type Busy='idle'|'quoting'|'discovering';
+type Busy='idle'|'quoting'|'discovering'|'bootstrapping';
+type EventSource='raydium_ws'|'raydium_reconcile'|'orca_refresh';
+const emptyCombination=():LiveCombination=>({candidates:[],unmatchedReverseLegs:0,failed:0,evaluated:0});
 
 export class MarketEngine {
  private readonly pools:DiscoveredPool[];
  private topology:ReturnType<typeof buildCandidates>;
- private readonly ray:AmmV4Monitor;
+ private readonly ray:LiveRaydiumMonitor;
  private readonly orca:OrcaMonitor;
  private running=false;
  private busy:Busy='idle';
@@ -43,6 +46,21 @@ export class MarketEngine {
  private lastNetPositive=false;
  private previousRateLimits=0;
  private previousFailovers=0;
+ private unsubscribeScanner?:()=>void;
+ private liveCandidates:ArbitrageCandidate[]=[];
+ private combination:LiveCombination=emptyCombination();
+ private marketEvents=0;
+ private localEvaluations=0;
+ private marketEventEvaluations=0;
+ private orcaTriggers=0;
+ private suppressedTriggers=0;
+ private latencySamples:number[]=[];
+ private lastEvaluationAt?:string;
+ private lastEventAt?:string;
+ private lastSource?:EventSource;
+ private lastOrcaStartedAt=0;
+ private lastOrcaFinishedAt?:string;
+ private lastHistoryAt=0;
 
  constructor(
   private readonly conn:Connection,
@@ -59,62 +77,132 @@ export class MarketEngine {
   this.discoveryValidated=discovered.validatedCount??discovered.pools.length;
   this.lastDiscoveryAt=new Date().toISOString();
   this.lastDiscoveryAttempt=Date.now();
-  this.ray=new AmmV4Monitor(conn,this.pools,config.jupiter.sizesUsd,config.ammScanIntervalMs,config.ammMaxSlotSkew,config.minQuoteLiquidityUsd);
+  this.ray=new LiveRaydiumMonitor(
+   conn,this.pools,config.jupiter.sizesUsd,config.ammMaxSlotSkew,
+   config.b5MaxComponentAgeMs,config.minQuoteLiquidityUsd,
+   config.b5ReconcileMs,event=>this.onRaydiumEvent(event)
+  );
   this.orca=new OrcaMonitor(conn,this.pools,config.jupiter.sizesUsd,
-   ()=>this.ray.snapshot().quotes,config.jupiter.assumedCostUsd,config.orcaScanIntervalMs,config.minQuoteLiquidityUsd);
-  this.note('info','startup','Monitoring initialized for SOL/USDC. No execution or wallet operations enabled.');
+   ()=>this.ray.snapshot().quotes,config.jupiter.assumedCostUsd,
+   config.b5OrcaRefreshMs,config.minQuoteLiquidityUsd);
+  this.note('info','startup','B5 read-only engine initialized. Raydium vaults: WebSocket state; Orca: SDK refreshes.');
  }
  private note(level:Activity['level'],kind:string,message:string){
   this.events.unshift({id:++this.eventId,at:new Date().toISOString(),level,kind,message});
   this.events=this.events.slice(0,24);
  }
- private scanInterval():number {
-  return Math.max(this.config.ammScanIntervalMs,this.config.orcaScanIntervalMs);
+ private readonly minManualScanMs=30000;
+ private readonly minManualDiscoveryMs=120000;
+ private schedule(delayMs=this.config.b5OrcaRefreshMs){
+  if(!this.running)return;
+  if(this.timer)clearTimeout(this.timer);
+  const ms=Math.max(100,delayMs);
+  this.nextScanAt=new Date(Date.now()+ms).toISOString();
+  this.timer=setTimeout(()=>{void this.scan('scheduled');},ms);
  }
  private discoveryInterval():number{
   return this.lastNetPositive?this.config.discoveryRefreshMs:this.config.noProfitDiscoveryMs;
  }
- private schedule(delayMs=this.scanInterval()){
-  if(!this.running)return;
-  if(this.timer)clearTimeout(this.timer);
-  this.nextScanAt=new Date(Date.now()+delayMs).toISOString();
-  this.timer=setTimeout(()=>{void this.scan('scheduled');},delayMs);
+ private percentiles(){
+  const values=[...this.latencySamples].sort((a,b)=>a-b);
+  if(!values.length)return {p50Ms:null,p95Ms:null,maxMs:null};
+  return {p50Ms:values[Math.floor((values.length-1)*0.5)],
+   p95Ms:values[Math.floor((values.length-1)*0.95)],maxMs:values[values.length-1]};
  }
- private readonly minManualScanMs=30000;
- private readonly minManualDiscoveryMs=120000;
-
+ private evaluatedSummary(){
+  return assessRoutes(this.liveCandidates,{
+   ...this.config.freshness,minLiquidityUsd:this.config.minQuoteLiquidityUsd
+  });
+ }
+ private evaluate(source:EventSource,receivedAt:number,recordEvent:boolean){
+  if(!this.running)return;
+  const active=new Set(this.pools.map(p=>p.address));
+  const rayQuotes=this.ray.snapshot().quotes.filter(q=>active.has(q.pool));
+  const orcaLegs=this.orca.snapshot().quotedLegs.filter(q=>active.has(q.pool));
+  const liquidity=new Map(this.pools.map(p=>[p.address,p.liquidityUsd] as const));
+  this.combination=combineLiveQuotes(rayQuotes,orcaLegs,
+   this.config.jupiter.assumedCostUsd,liquidity);
+  this.liveCandidates=this.combination.candidates;
+  this.localEvaluations++;
+  if(recordEvent)this.marketEventEvaluations++;
+  this.lastSource=source;
+  this.lastEvaluationAt=new Date().toISOString();
+  const latencyMs=Math.max(0,Date.now()-receivedAt);
+  this.latencySamples.push(latencyMs);
+  if(this.latencySamples.length>256)this.latencySamples.shift();
+  const evaluated=this.evaluatedSummary();
+  this.lastNetPositive=evaluated.positiveComparable>0;
+  if(Date.now()-this.lastHistoryAt>=1500){
+   const at=this.lastEvaluationAt;
+   this.histories.push({at,comparable:evaluated.comparable,positive:evaluated.positiveComparable,
+    excluded:evaluated.excluded,bestNetUsd:evaluated.bestComparableNetUsd,total:evaluated.total});
+   this.histories=this.histories.slice(-48);
+   this.lastHistoryAt=Date.now();
+  }
+  if(evaluated.positiveComparable>0&&source!=='raydium_reconcile'){
+   this.note('success','estimate',evaluated.positiveComparable+' positive indicative comparisons; NOT execution-verified');
+  }
+ }
+ private onRaydiumEvent(event:LiveRaydiumEvent){
+  if(!this.running||this.busy==='discovering')return;
+  this.marketEvents++;
+  this.lastEventAt=new Date(event.receivedAt).toISOString();
+  this.evaluate(event.source==='websocket'?'raydium_ws':'raydium_reconcile',
+   event.receivedAt,event.source==='websocket');
+ }
+ private onPoolEvent(event:PoolChange){
+  if(!this.running||event.source!=='websocket')return;
+  const p=this.pools.find(p=>p.address===event.address);
+  if(p?.owner!==ORCA_WHIRLPOOL)return;
+  this.orcaTriggers++;
+  if(this.busy!=='idle'||Date.now()-this.lastOrcaStartedAt<this.config.b5OrcaMinTriggerMs){
+   this.suppressedTriggers++;return;
+  }
+  // Debounce account events and keep the per-provider RPC limiter intact.
+  this.schedule(300);
+ }
  async start(){
   if(this.running)return;
   this.running=true;
-  await this.scanner.start();
-  this.note('success','monitor','WebSocket/poll monitoring active; initial quote cycle scheduled.');
-  this.schedule(100);
+  this.busy='bootstrapping';
+  this.unsubscribeScanner=this.scanner.onUpdate(e=>this.onPoolEvent(e));
+  try{
+   await this.scanner.start();
+   await this.ray.start();
+   this.note('success','feed','Raydium pool and vault subscriptions active; local pricing enabled.');
+   this.busy='idle';
+   this.schedule(100);
+  }catch(error){
+   this.busy='idle';
+   this.note('warning','startup','Feed bootstrap failed: '+String(error));
+   if(this.running)this.schedule(1000);
+  }
  }
  async stop(){
   this.running=false;
   if(this.timer)clearTimeout(this.timer);
-  this.ray.stop();this.orca.stop();
+  this.unsubscribeScanner?.();this.unsubscribeScanner=undefined;
+  await this.ray.stop();
   await this.scanner.stop();
  }
  requestScan():{accepted:boolean;message:string}{
-  if(!this.running)return {accepted:false,message:'Scanner is not started'};
-  if(this.busy!=='idle')return {accepted:false,message:'A scan or discovery refresh is already running'};
+  if(!this.running)return {accepted:false,message:'Engine not started'};
+  if(this.busy!=='idle')return {accepted:false,message:'A quote refresh or discovery is running'};
   const left=this.minManualScanMs-(Date.now()-this.lastManualScanAt);
-  if(left>0)return {accepted:false,message:'Scan cooldown: '+Math.ceil(left/1000)+'s remaining'};
+  if(left>0)return {accepted:false,message:'Scan cooldown: '+Math.ceil(left/1000)+'s'};
   this.lastManualScanAt=Date.now();
-  if(this.timer)clearTimeout(this.timer);
-  void this.scan('manual');
-  return {accepted:true,message:'Fresh Raydium and Orca quote cycle requested'};
+  this.schedule(100);
+  return {accepted:true,message:'Orca SDK refresh requested; Raydium continues responding to live events'};
  }
  requestDiscovery():{accepted:boolean;message:string}{
-  if(!this.running)return {accepted:false,message:'Scanner is not started'};
-  if(this.busy!=='idle')return {accepted:false,message:'A scan or discovery refresh is already running'};
+  if(!this.running)return {accepted:false,message:'Engine not started'};
+  if(this.busy!=='idle')return {accepted:false,message:'A quote refresh or discovery is running'};
   const left=this.minManualDiscoveryMs-(Date.now()-this.lastManualDiscoveryAt);
-  if(left>0)return {accepted:false,message:'Discovery cooldown: '+Math.ceil(left/1000)+'s remaining'};
+  if(left>0)return {accepted:false,message:'Discovery cooldown: '+Math.ceil(left/1000)+'s'};
   this.lastManualDiscoveryAt=Date.now();
   if(this.timer)clearTimeout(this.timer);
   void this.discoverAndResume('manual');
-  return {accepted:true,message:'Refreshing supported SOL/USDC pool universe'};
+  return {accepted:true,message:'Validating a wider SOL/USDC pool universe'};
  }
  private async discoverAndResume(reason:string){
   if(this.busy!=='idle')return;
@@ -123,87 +211,77 @@ export class MarketEngine {
   catch(error){
    this.discoveryStatus='partial_error';
    this.discoveryWarnings=[String(error)];
-   this.note('warning','discovery','Discovery refresh failed; retaining previous pools');
+   this.note('warning','discovery','Discovery refresh failed; previous universe retained');
   }finally{
    this.busy='idle';
-   this.schedule(2000);
+   this.schedule(1000);
   }
  }
  private async refreshUniverse(reason:string){
   this.busy='discovering';
   this.lastDiscoveryAttempt=Date.now();
   this.lastDiscoveryReason=reason;
-  this.note('info','discovery',reason==='manual'?'Manual pool discovery started':reason==='no_fresh_profitable_routes'?'No positive comparable routes; checking a wider SOL/USDC pool universe':'Scheduled SOL/USDC pool discovery started');
-  // rotate secondary quote-supported pools when their full universe has more
-  // than the active per-venue cap; keep the highest-liquidity anchors.
+  this.note('info','discovery',reason==='manual'?'Manual discovery started':
+   reason==='no_fresh_profitable_routes'?'No positive comparable spreads; rotating supported pools':'Scheduled pool discovery started');
   const result=await discoverPools(this.conn,this.manualPools,this.config.maxPools,this.discoveryRuns);
   this.discoveryRuns++;
   this.discoveryWarnings=result.warnings;
   this.discoveryValidated=result.validatedCount??result.pools.length;
   if(!result.pools.length){
    this.discoveryStatus='partial_error';
-   this.note('warning','discovery','Pool sources returned no validated pools; kept previous universe');
+   this.note('warning','discovery','No validated pools returned; retaining existing subscriptions');
    return;
   }
   const oldHasBoth=this.pools.some(p=>p.owner===RAYDIUM_AMM_V4)&&this.pools.some(p=>p.owner===ORCA_WHIRLPOOL);
   const newHasBoth=result.pools.some(p=>p.owner===RAYDIUM_AMM_V4)&&result.pools.some(p=>p.owner===ORCA_WHIRLPOOL);
   if(oldHasBoth&&!newHasBoth){
    this.discoveryStatus='partial_error';
-   this.note('warning','discovery','Discovery missing a required DEX; retained the last working pool universe');
+   this.note('warning','discovery','Refresh lost a supported venue; retaining previous universe');
    return;
   }
-  const previous=new Set(this.pools.map(p=>p.address));
+  const old=new Set(this.pools.map(p=>p.address));
   const next=new Set(result.pools.map(p=>p.address));
-  this.discoveryAdded=[...next].filter(x=>!previous.has(x)).length;
-  this.discoveryRemoved=[...previous].filter(x=>!next.has(x)).length;
+  this.discoveryAdded=[...next].filter(p=>!old.has(p)).length;
+  this.discoveryRemoved=[...old].filter(p=>!next.has(p)).length;
   await this.scanner.replacePools(result.pools.map(p=>new PublicKey(p.address)));
   this.pools.splice(0,this.pools.length,...result.pools);
+  await this.ray.replacePools();
   this.topology=buildCandidates(this.pools);
   this.lastDiscoveryAt=new Date().toISOString();
   this.discoveryStatus=result.warnings.length?'partial_error':'ok';
+  this.evaluate('raydium_reconcile',Date.now(),false);
   this.note(this.discoveryStatus==='ok'?'success':'warning','discovery',
-   'Universe refreshed: '+this.pools.length+' pools, '+this.discoveryAdded+' added, '+this.discoveryRemoved+' removed');
+   'Refreshed: '+this.pools.length+' pools; '+this.discoveryAdded+' added; '+this.discoveryRemoved+' removed');
  }
  private async scan(reason:string){
   if(!this.running||this.busy!=='idle')return;
   this.busy='quoting';
   const began=Date.now();
+  this.lastOrcaStartedAt=began;
   this.lastScanStartedAt=new Date(began).toISOString();
   this.nextScanAt=undefined;
-  this.note('info','scan',reason==='manual'?'Manual quote scan started':'Automatic Raydium → Orca quote scan started');
+  if(reason==='scheduled')this.note('info','orca','Refreshing Orca SDK quotes; Raydium remains event-driven');
   try{
-   // Synchronized orchestration avoids racing the first Orca scan against
-   // an empty Raydium snapshot; quote reads themselves are NOT atomic.
-   await this.ray.scanOnce();
-   if(!this.running)return;
    await this.orca.scanOnce();
-   const x=this.assessment();
-   this.lastNetPositive=x.positiveComparable>0;
+   if(!this.running)return;
+   this.evaluate('orca_refresh',Date.now(),false);
+   const result=this.evaluatedSummary();
    this.cycles++;
    this.lastScanAt=new Date().toISOString();
+   this.lastOrcaFinishedAt=this.lastScanAt;
    this.lastScanDurationMs=Date.now()-began;
-   this.histories.push({at:this.lastScanAt,comparable:x.comparable,positive:x.positiveComparable,
-    excluded:x.excluded,bestNetUsd:x.bestComparableNetUsd,total:x.total});
-   this.histories=this.histories.slice(-48);
-   const network=this.rpc.snapshot();
-   const rateLimits=(network.primary.rateLimits??0)+(network.secondary?.rateLimits??0);
-   if(rateLimits>this.previousRateLimits){
-    this.note('warning','rpc','Provider rate limits increased by '+(rateLimits-this.previousRateLimits)+' during quote monitoring');
-   }
-   if(network.failovers>this.previousFailovers){
-    this.note('info','rpc',(network.failovers-this.previousFailovers)+' HTTP request(s) sent to the backup provider');
-   }
+   const rpc=this.rpc.snapshot();
+   const rateLimits=(rpc.primary.rateLimits??0)+(rpc.secondary?.rateLimits??0);
+   if(rateLimits>this.previousRateLimits)
+    this.note('warning','rpc',(rateLimits-this.previousRateLimits)+' new HTTP 429 responses');
+   if(rpc.failovers>this.previousFailovers)
+    this.note('info','rpc',(rpc.failovers-this.previousFailovers)+' requests used the backup provider');
    this.previousRateLimits=rateLimits;
-   this.previousFailovers=network.failovers;
-   if(x.positiveComparable>0){
-    this.note('success','scan',x.positiveComparable+' positive research-only comparisons; all remain non-executable');
-   }else if(!x.total){
-    this.note('warning','scan','No complete cross-DEX routes; inspect Raydium/Orca errors and RPC health');
-   }else if(!x.comparable){
-    this.note('warning','scan','All '+x.total+' routes excluded by freshness, slot skew, or liquidity checks');
-   }else{
-    this.note('info','scan',x.comparable+' comparable routes; none positive after assumed costs');
-   }
+   this.previousFailovers=rpc.failovers;
+   if(!result.total)this.note('warning','coverage','No contiguous cross-DEX quotes; check Orca errors and pool state');
+   else if(!result.comparable)this.note('info','freshness',
+    result.total+' route estimates evaluated; none pass timing/slot/liquidity criteria');
+   else this.note('info','comparison',result.comparable+' comparable routes, '+result.positiveComparable+' positive after assumed costs');
    const due=Date.now()-Math.max(this.lastDiscoveryAttempt,Date.parse(this.lastDiscoveryAt))>=this.discoveryInterval();
    if(this.running&&due){
     try{await this.refreshUniverse(this.lastNetPositive?'scheduled':'no_fresh_profitable_routes');}
@@ -213,49 +291,76 @@ export class MarketEngine {
     }
    }
   }catch(error){
-   this.note('warning','scan','Quote cycle encountered an error: '+String(error));
+   this.note('warning','orca','Orca quote cycle failed: '+String(error));
   }finally{
    this.busy='idle';
    if(this.running)this.schedule();
   }
  }
- assessment():RouteSummary{
-  const raw=this.orca.snapshot().routeCandidates;
-  return assessRoutes(raw,{...this.config.freshness,minLiquidityUsd:this.config.minQuoteLiquidityUsd});
- }
+ assessment():RouteSummary{return this.evaluatedSummary();}
  dashboard(){
-  const quote=this.assessment();
+  const comparison=this.assessment();
   const r=this.ray.snapshot(),o=this.orca.snapshot(),s=this.scanner.snapshot();
-  const programCounts={
+  const cover={
    raydiumV4:this.pools.filter(p=>p.owner===RAYDIUM_AMM_V4).length,
    orcaWhirlpool:this.pools.filter(p=>p.owner===ORCA_WHIRLPOOL).length,
    raydiumClmmUnsupported:this.pools.filter(p=>p.owner===RAYDIUM_CLMM).length
   };
+  const rpc=this.rpc.snapshot();
+  const statuses=[
+   {label:'Unprofitable',count:comparison.negativeComparable,reason:'Valid research comparisons with net ≤ 0'},
+   {label:'Positive estimate',count:comparison.positiveComparable,reason:'Positive estimate; not simulated or executable'},
+   {label:'Stale / unaligned',count:comparison.excluded,reason:'Time, slot or liquidity checks failed'},
+   {label:'Missing route',count:this.combination.unmatchedReverseLegs,reason:'No exact-input Orca reverse quote for Raydium leg'}
+  ];
+  const reasons=Object.entries(comparison.excludedByReason).sort((a,b)=>b[1]-a[1]);
   return {
-   phase:'B4',mode:'READ_ONLY',now:new Date().toISOString(),market:'SOL/USDC',
+   phase:'B5',mode:'READ_ONLY',now:new Date().toISOString(),market:'SOL/USDC',
    status:this.busy==='idle'?'monitoring':this.busy,
    scan:{status:this.busy,lastStartedAt:this.lastScanStartedAt,lastFinishedAt:this.lastScanAt,
     lastDurationMs:this.lastScanDurationMs,completedCycles:this.cycles,
-    intervalMs:this.scanInterval(),nextAt:this.nextScanAt},
+    intervalMs:this.config.b5OrcaRefreshMs,nextAt:this.nextScanAt},
+   b5:{architecture:'Raydium WebSocket pool/vault cache + local route math; Orca SDK refreshed on a bounded schedule',
+    raydiumTransport:'WebSocket + periodic coherent-context HTTP reconciliation',
+    orcaTransport:'SDK/RPC refreshed on pool changes with cooldown, plus periodic refresh',
+    marketEvents:this.marketEvents,localRecomputations:r.localRecomputations,
+    localEvaluations:this.localEvaluations,eventEvaluations:this.marketEventEvaluations,
+    orcaEventTriggers:this.orcaTriggers,coalescedTriggers:this.suppressedTriggers,
+    lastMarketEventAt:this.lastEventAt,lastEvaluationAt:this.lastEvaluationAt,
+    lastEvaluationSource:this.lastSource,wsSubscriptions:r.subscriptions,
+    raydiumReadyPools:r.readyPools,raydiumTrackedPools:r.poolCount,
+    raydiumReconcilations:r.reconciliations,
+    lastOrcaRefreshAt:this.lastOrcaFinishedAt,
+    latency:this.percentiles(),latencyDefinition:'Milliseconds from local update callback receipt to local route recomputation (not chain-to-bot latency)',
+    routeEvaluations:this.combination.evaluated,
+    exactInputMisses:this.combination.unmatchedReverseLegs,
+    evaluationFailures:this.combination.failed,
+    statuses,topExclusionReason:reasons[0]?.[0]??null,
+    limitations:['Orca SDK tick arrays use RPC, not a full in-memory ticker',
+     'Raydium vault-only CPMM ignores OpenBook open orders',
+     'Slot proximity does not imply atomic same-state execution',
+     'No transaction simulation, signing or broadcast']},
    discovery:{status:this.discoveryStatus,lastAt:this.lastDiscoveryAt,
     nextAt:new Date(Math.max(this.lastDiscoveryAttempt,Date.parse(this.lastDiscoveryAt))+this.discoveryInterval()).toISOString(),
     intervalMs:this.discoveryInterval(),reason:this.lastDiscoveryReason,
     validatedCandidates:this.discoveryValidated,trackedPools:this.pools.length,
     newlyAdded:this.discoveryAdded,removed:this.discoveryRemoved,
-    quoteSupportedPools:this.pools.filter(p=>[RAYDIUM_AMM_V4,ORCA_WHIRLPOOL].includes(p.owner) && (p.liquidityUsd===undefined||p.liquidityUsd>=this.config.minQuoteLiquidityUsd)).length,
-    lowLiquidityExcluded:this.pools.filter(p=>[RAYDIUM_AMM_V4,ORCA_WHIRLPOOL].includes(p.owner) && p.liquidityUsd!==undefined && p.liquidityUsd<this.config.minQuoteLiquidityUsd).length,
-    coverage:programCounts,
-    theoreticalTopologies:this.topology.candidates.length,
-    warnings:this.discoveryWarnings},
-   opportunities:{total:quote.total,comparable:quote.comparable,excluded:quote.excluded,
-    positive:quote.positiveComparable,negative:quote.negativeComparable,
-    bestComparableNetUsd:quote.bestComparableNetUsd,bestRawNetUsd:quote.bestRawNetUsd,
-    excludedByReason:quote.excludedByReason,rules:{...this.config.freshness,
-      minLiquidityUsd:this.config.minQuoteLiquidityUsd},
-    comparableRoutes:quote.comparableCandidates.slice(0,20),
-    excludedRoutes:quote.excludedCandidates.slice(0,12)},
+    quoteSupportedPools:this.pools.filter(p=>[RAYDIUM_AMM_V4,ORCA_WHIRLPOOL].includes(p.owner)&&
+     (p.liquidityUsd===undefined||p.liquidityUsd>=this.config.minQuoteLiquidityUsd)).length,
+    lowLiquidityExcluded:this.pools.filter(p=>[RAYDIUM_AMM_V4,ORCA_WHIRLPOOL].includes(p.owner)&&
+     p.liquidityUsd!==undefined&&p.liquidityUsd<this.config.minQuoteLiquidityUsd).length,
+    coverage:cover,theoreticalTopologies:this.topology.candidates.length,warnings:this.discoveryWarnings},
+   opportunities:{total:comparison.total,comparable:comparison.comparable,
+    excluded:comparison.excluded,positive:comparison.positiveComparable,
+    negative:comparison.negativeComparable,bestComparableNetUsd:comparison.bestComparableNetUsd,
+    bestRawNetUsd:comparison.bestRawNetUsd,
+    excludedByReason:comparison.excludedByReason,rules:{...this.config.freshness,
+     minLiquidityUsd:this.config.minQuoteLiquidityUsd},
+    comparableRoutes:comparison.comparableCandidates.slice(0,20),
+    excludedRoutes:comparison.excludedCandidates.slice(0,12)},
    raydium:{status:r.status,poolCount:r.poolCount,quotes:r.quotes.length,
-    lastUpdatedAt:r.lastUpdatedAt,progress:r.progress,errors:r.errors.slice(0,6)},
+    readyPools:r.readyPools,events:r.events,progress:r.progress,
+    lastUpdatedAt:r.lastUpdatedAt,errors:[...r.errors,...Object.entries(r.poolReasons).map(([key,value])=>key+': '+value)].slice(0,6)},
    orca:{status:o.status,poolCount:o.orcaPools,quotedLegs:o.quotedLegs.length,
     lastUpdatedAt:o.lastUpdatedAt,progress:o.progress,errors:o.errors.slice(0,6)},
    feed:{status:s.status,stalePools:s.pools.filter(p=>p.stale).length,
@@ -263,9 +368,9 @@ export class MarketEngine {
    jupiter:{status:this.jupiter.snapshot().status,
     lastFinishedAt:this.jupiter.snapshot().lastScanFinishedAt,
     bestNetUsd:this.jupiter.snapshot().observations.length?
-    Math.max(...this.jupiter.snapshot().observations.map(p=>p.estimatedNetUsd)):null},
-   rpc:this.rpc.snapshot(),history:this.histories.slice(-48),activity:this.events.slice(0,12),
-   safety:'Comparison-only, not atomic or simulated; no transactions, wallets, or guaranteed profits.'
+     Math.max(...this.jupiter.snapshot().observations.map(p=>p.estimatedNetUsd)):null},
+   rpc,history:this.histories.slice(-48),activity:this.events.slice(0,12),
+   safety:'Read-only B5 research. Quotes are indicative; no simulated or executable trades.'
   };
  }
  getTopology(){return this.topology;}
