@@ -59,6 +59,7 @@ export class ClmmMonitor {
  private scans=0;
  private refreshing?:string;
  private failures=new Map<string,string>();
+ private readinessReasons=new Map<string,string>();
  private pendingDirty=new Set<string>();
  private requestTimer?:ReturnType<typeof setTimeout>;
  private dirtyEvents=0;
@@ -110,6 +111,7 @@ export class ClmmMonitor {
   if(!previous)return;
   previous.release.forEach(stop=>stop());
   this.cache.delete(pool);
+  this.readinessReasons.delete(pool);
   if(this.feed?.hasDependencies(this.dependencyPrefix+pool))this.feed.clearDependencies(this.dependencyPrefix+pool);
  }
  /** Update cached CLMM swap parameters from the same slot-aware pool/tick
@@ -124,6 +126,13 @@ export class ClmmMonitor {
   const extension=this.feed.get(entry.extraKeys[1]);
   const verifiedNoExtension=this.feed.getVerifiedAbsent(entry.extraKeys[1]);
   if(!poolState||tickStates.some(t=>!t)||!configState||!extension&&!verifiedNoExtension){
+   const reasons:string[]=[];
+   if(!poolState)reasons.push('pool_state_missing');
+   const tickMissing=tickStates.filter(t=>!t).length;
+   if(tickMissing)reasons.push('tick_arrays_missing_'+tickMissing);
+   if(!configState)reasons.push('config_account_missing');
+   if(!extension&&!verifiedNoExtension)reasons.push('bitmap_extension_unverified');
+   this.readinessReasons.set(pool,reasons.join(','));
    entry.verifiedCache=false;
    return false;
   }
@@ -131,7 +140,10 @@ export class ClmmMonitor {
    ...tickStates.filter((t):t is NonNullable<typeof t>=>Boolean(t)),
    ...(extension?[extension]:[verifiedNoExtension!])];
   const valid=validateLocalComponents(observations,Date.now(),this.maxCacheAgeMs,this.maxSlotSkew);
-  if(!valid.ok){entry.verifiedCache=false;return false;}
+  if(!valid.ok){
+   this.readinessReasons.set(pool,valid.reason??'invalid_component_freshness');
+   entry.verifiedCache=false;return false;
+  }
   try{
    if(poolState.owner!==RAYDIUM_CLMM)throw new Error('CLMM owner changed');
    const decoded=PoolInfoLayout.decode(poolState.data);
@@ -174,10 +186,12 @@ export class ClmmMonitor {
    entry.tickArraySlot=Math.min(...tickStates.map(t=>t!.slot));
    entry.observedAt=new Date(valid.oldestAt).toISOString();
    entry.verifiedCache=true;
+   this.readinessReasons.delete(pool);
    this.localRecomputations++;
    return true;
   }catch(error){
    entry.verifiedCache=false;
+   this.readinessReasons.set(pool,'onchain_state_decode: '+String(error));
    this.errors.unshift(pool+': local CLMM decoding: '+String(error));
    this.errors=this.errors.slice(0,10);
    return false;
@@ -367,7 +381,8 @@ export class ClmmMonitor {
    const status:'fresh'|'expired'|'missing'|'refreshing'=this.refreshing===p.address?'refreshing':
     !cache?'missing':!cache.verifiedCache?'expired':this.selected(cache,now)?'fresh':'expired';
    return {pool:p.address,status,
-    reason:this.failures.get(p.address)??(cache&&!cache.verifiedCache?'tick_array_state_incomplete_or_slot_skew':undefined),
+    reason:this.failures.get(p.address)??this.readinessReasons.get(p.address)??
+     (cache&&!cache.verifiedCache?'tick_array_state_incomplete_or_slot_skew':undefined),
     lastObservedAt:cache?.observedAt,ageMs,tickArrays:cache?.tickArrayCount??0,
     slot:cache?.slot,tickArraySlot:cache?.tickArraySlot??null,
     tickArraySlotVerified:cache?.verifiedCache??false};
