@@ -33,6 +33,9 @@ export type LocalQuoteFailure={
 export class QuoteFailureGate{
  private rows=new Map<string,LocalQuoteFailure>();
  private skipped=0;
+ constructor(private readonly maxEntries=512){
+  if(!Number.isSafeInteger(maxEntries)||maxEntries<1)throw new Error('Invalid quote failure cache capacity');
+ }
  private key(pool:string,direction:Direction,inputRaw:bigint){return pool+':'+direction+':'+inputRaw;}
  blocked(pool:string,direction:Direction,inputRaw:bigint,componentKey:string){
   const id=this.key(pool,direction,inputRaw),f=this.rows.get(id);
@@ -43,8 +46,16 @@ export class QuoteFailureGate{
   const id=this.key(pool,direction,inputRaw),now=new Date().toISOString();
   const prior=this.rows.get(id);
   if(prior?.componentKey===componentKey)return false;
+  // Full quote mode may probe many distinct SOL amounts. Keep bounded
+  // state instead of growing without limit across independent snapshots.
+  this.rows.delete(id);
   this.rows.set(id,{pool,direction,inputRaw:inputRaw.toString(),componentKey,reason,
    firstAt:now,lastAt:now,skipCount:0});
+  while(this.rows.size>this.maxEntries){
+   const oldest=this.rows.keys().next().value;
+   if(oldest===undefined)break;
+   this.rows.delete(oldest);
+  }
   return true;
  }
  recover(pool:string,direction:Direction,inputRaw:bigint){
