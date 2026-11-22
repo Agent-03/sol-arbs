@@ -4,6 +4,7 @@ import {combineLiveQuotes} from '../src/liveRoutes.js';
 import type {AmmV4Quote} from '../src/ammV4.js';
 import type {OrcaQuote} from '../src/orca.js';
 import {assessRoutes} from '../src/opportunities.js';
+import type {ClmmQuote} from '../src/clmm.js';
 
 const ts='2026-11-22T04:00:00.000Z';
 const ray:AmmV4Quote={
@@ -61,4 +62,42 @@ test('event-updated quote still obeys independent source timestamps',()=>{
  assert.equal(assessed.total,1);
  assert.equal(assessed.comparable,0);
  assert.ok(assessed.excludedCandidates[0].freshnessReasons.includes('quote_gap_exceeded'));
+});
+
+test('CLMM leg uses SDK tick-array-aware quote result for exact Orca input',()=>{
+ const clmm:ClmmQuote={
+  pool:'Clmm-1',direction:'USDC_TO_SOL',
+  inputRaw:'5000000',outputRaw:'71500000',
+  observedAt:ts,computedAt:ts,poolSlot:103,
+  feeRaw:'1000',tickArraysObservedAt:ts,tickArraySlot:null,
+  quoteModel:'raydium_clmm_sdk_tick_array',snapshotIntegrity:'multi_rpc_context_unverified'
+ };
+ const sellClmm=(pool:string,raw:bigint):ClmmQuote|null=>
+  pool==='Clmm-1'&&raw===72000000n?{...clmm,direction:'SOL_TO_USDC',
+   inputRaw:raw.toString(),outputRaw:'5040000'}:null;
+ const reverse={...orcaSell,inputRaw:'71500000'};
+ const result=combineLiveQuotes([], [orcaBuy,reverse],0.02,liquidity,
+  [clmm],sellClmm);
+ assert.equal(result.clmmEvaluated,2);
+ assert.equal(result.candidates.length,2);
+ assert.ok(result.candidates.every(q=>q.raydiumModel==='clmm'));
+ const first=result.candidates.find(q=>q.buyVenue==='orca');
+ const second=result.candidates.find(q=>q.buyVenue==='raydium');
+ assert.equal(first?.outputUsdcRaw,'5040000');
+ assert.equal(first?.sellPool,'Clmm-1');
+ assert.equal(second?.outputUsdcRaw,'5050000');
+ assert.equal(second?.buyPool,'Clmm-1');
+ assert.ok(first?.rejectionReasons.includes('not_atomic_transaction_simulation'));
+});
+test('CLMM reverse SDK output is never fabricated if exact-input quote unavailable',()=>{
+ const clmm:ClmmQuote={
+  pool:'Clmm-2',direction:'USDC_TO_SOL',inputRaw:'5000000',outputRaw:'71700000',
+  observedAt:ts,computedAt:ts,poolSlot:103,feeRaw:'0',
+  tickArraysObservedAt:ts,tickArraySlot:null,
+  quoteModel:'raydium_clmm_sdk_tick_array',snapshotIntegrity:'multi_rpc_context_unverified'
+ };
+ const x=combineLiveQuotes([], [orcaBuy,orcaSell],0.02,liquidity,[clmm],()=>null);
+ assert.equal(x.candidates.length,0);
+ assert.ok(x.unmatchedReverseLegs>0);
+ assert.equal(x.failed,1);
 });
