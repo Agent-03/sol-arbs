@@ -74,10 +74,10 @@ async function main(){
    res.end(JSON.stringify(data));
   };
   try{
-   if((path==='/'||path==='/terminal')&&req.method==='GET'){
+   if((path==='/'||path==='/terminal'||path==='/legacy')&&req.method==='GET'){
     res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store',
      'x-content-type-options':'nosniff','referrer-policy':'no-referrer'});
-    res.end(path==='/terminal'?dashboardHtml:explorerHtml);
+    res.end(path==='/legacy'?dashboardHtml:explorerHtml);
     return;
    }
    if(req.method==='POST'&&(path==='/api/actions/scan'||path==='/api/actions/discover'||path==='/api/actions/validate'||path==='/api/actions/c3-analyze')){
@@ -189,7 +189,8 @@ async function main(){
  });
  server.listen(config.port,'127.0.0.1',()=>{
   console.log('SOL ARB activity explorer http://127.0.0.1:'+config.port+'/');
-  console.log('Original monitoring dashboard http://127.0.0.1:'+config.port+'/terminal');
+  console.log('C3D wSOL radar http://127.0.0.1:'+config.port+'/terminal');
+  console.log('Legacy C2 research dashboard http://127.0.0.1:'+config.port+'/legacy');
   console.log('Market metrics http://127.0.0.1:'+config.port+'/api/dashboard');
  });
  jupiter.start();
