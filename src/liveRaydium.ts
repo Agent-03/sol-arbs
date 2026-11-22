@@ -221,6 +221,10 @@ export class LiveRaydiumMonitor{
    const address=keys[i].toBase58();
    const previous=pool.components.get(address);
    if(previous&&previous.slot>result.context.slot)continue;
+   // An unchanged account reread at the same context slot is verification,
+   // not a newer market observation. Preserve the original receipt age.
+   if(previous&&previous.slot===result.context.slot&&
+      previous.data.equals(accounts[i].data))continue;
    pool.components.set(address,{data:Buffer.from(accounts[i].data),slot:result.context.slot,receivedAt});
   }
   this.reconciliations++;
@@ -243,7 +247,7 @@ export class LiveRaydiumMonitor{
     if(!pool||![pool.address,...pool.vaults].includes(update.address))continue;
     const info:AccountInfo<Buffer>={
      data:Buffer.from(update.data),owner:new PublicKey(update.owner),
-     lamports:0,executable:false,rentEpoch:0
+     lamports:update.lamports,executable:update.executable,rentEpoch:update.rentEpoch
     };
     this.setComponent(pool,update.address,info,update.slot,
      update.source==='websocket'||update.source==='geyser'?'websocket':'reconcile',
