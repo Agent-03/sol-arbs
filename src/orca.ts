@@ -2,7 +2,7 @@ import {Connection,Keypair,PublicKey} from '@solana/web3.js';
 import {AnchorProvider,Wallet} from '@coral-xyz/anchor';
 import BN from 'bn.js';
 import {Percentage} from '@orca-so/common-sdk';
-import {WhirlpoolContext,buildWhirlpoolClient,swapQuoteByInputToken,IGNORE_CACHE,ORCA_WHIRLPOOL_PROGRAM_ID} from '@orca-so/whirlpools-sdk';
+import {WhirlpoolContext,buildWhirlpoolClient,swapQuoteByInputToken,IGNORE_CACHE} from '@orca-so/whirlpools-sdk';
 import {SOL_MINT,USDC_MINT,type DiscoveredPool} from './discovery.js';
 import {ORCA_WHIRLPOOL} from './routes.js';
 import {amountOutExactInput,type AmmV4Quote} from './ammV4.js';
@@ -52,7 +52,7 @@ export class OrcaMonitor{
   // Ephemeral, unused local signing identity required by legacy SDK provider.
   // This service NEVER signs or broadcasts transactions.
   const provider=new AnchorProvider(connection,new Wallet(Keypair.generate()),{commitment:'confirmed'});
-  this.ctx=WhirlpoolContext.withProvider(provider,ORCA_WHIRLPOOL_PROGRAM_ID);
+  this.ctx=WhirlpoolContext.withProvider(provider);
   this.client=buildWhirlpoolClient(this.ctx);
  }
  snapshot():OrcaStatus{return {...this.state,quotedLegs:[...this.state.quotedLegs],routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};}
