@@ -77,7 +77,7 @@ export class AmmV4Monitor {
  async scanOnce(){
   if(this.busy)return;
   this.busy=true;
-  const supported=this.pools.filter(p=>p.owner===RAYDIUM_AMM_V4&&p.venue==='raydium');
+  const supported=this.pools.filter(p=>p.owner===RAYDIUM_AMM_V4&&(p.venue==='raydium'||p.venue==='manual'));
   this.state={...this.state,status:'scanning',poolCount:supported.length,progress:{totalPools:supported.length,completedPools:0,quotesProduced:0}};
   const quotes:AmmV4Quote[]=[],errors:string[]=[];
   try{
