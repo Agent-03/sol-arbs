@@ -32,6 +32,7 @@ export type GraphMonitorOptions={
  registryTtlMs?:number;registryMinLiquidityUsd?:number;
  dlmmEnabled?:boolean;dlmmMaxPools?:number;dlmmConcurrency?:number;
  dlmmRefreshMs?:number;dlmmMaxArraysPerSide?:number;
+ dlmmRefreshBudget?:number;dlmmRefreshConcurrency?:number;
 };
 export type GraphMonitorSnapshot=GraphEvaluation&{
  status:'disabled'|'discovering'|'warming'|'monitoring'|'partial_error'|'stopped';
@@ -147,7 +148,9 @@ export class C3GraphMonitor{
    refreshMs:options.dlmmRefreshMs??8000,
    concurrency:options.dlmmConcurrency??3,
    minLiquidityUsd:options.minLiquidityUsd,
-   maxArraysPerSide:options.dlmmMaxArraysPerSide??3
+   maxArraysPerSide:options.dlmmMaxArraysPerSide??3,
+   refreshBudget:options.dlmmRefreshBudget??8,
+   refreshConcurrency:options.dlmmRefreshConcurrency??4
   },()=>this.scheduleEvaluation());
   if(!options.enabled)this.status='disabled';
  }
