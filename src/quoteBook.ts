@@ -14,8 +14,8 @@ export class LastKnownQuoteBook<T extends StoredQuote>{
   this.rows.set(value.pool,book);
  }
  complete(pool:string,at:string){
-  this.pending.delete(pool);
-  if(this.rows.get(pool)?.size)this.completedAt.set(pool,at);
+  const noNewQuotes=this.pending.delete(pool);
+  if(!noNewQuotes&&this.rows.get(pool)?.size)this.completedAt.set(pool,at);
  }
  fail(pool:string){this.pending.delete(pool);}
  retain(pools:ReadonlySet<string>){
