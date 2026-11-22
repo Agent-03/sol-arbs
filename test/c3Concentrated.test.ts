@@ -63,7 +63,7 @@ test('C3C rejects too-old concentrated-liquidity data and TVL depth limits',()=>
  const old={...clmm,observedAt:new Date(now-25000).toISOString()};
  assert.equal(evaluateGraphCycles([base,old],limits,now).twoLegCycles,0);
  const thin={...clmm,liquidityUsd:50000};
- const r=evaluateGraphCycles([base,thin],limits,now);
+ const r=evaluateGraphCycles([base,thin],{...limits,maxPoolInputShareBps:50},now);
  assert.ok(r.depthRejected>0);
  assert.equal(r.twoLegCycles,0);
 });
