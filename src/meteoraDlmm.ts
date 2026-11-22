@@ -643,6 +643,15 @@ export class MeteoraDlmmMonitor{
    const entry=this.entries.get(c.address);
    const value=entry?this.state(entry,now):{ok:false,reason:this.pending.has(c.address)?
     'bootstrapping_bin_arrays':'pool_not_prepared'};
+   if(entry){
+    if(value.ok){
+     entry.readySince??=now;
+     entry.notReadySince=undefined;
+    }else{
+     entry.notReadySince??=now;
+     entry.readySince=undefined;
+    }
+   }
    return {address:c.address,pair:assetOfMint(c.mintA)+'/'+assetOfMint(c.mintB),
     status:(value.ok?'ready':this.pending.has(c.address)?'warming':'not_ready') as DlmmPoolReadiness['status'],
     reason:value.ok?undefined:value.reason,quoteFailure:entry?.quoteFailure,
@@ -653,7 +662,15 @@ export class MeteoraDlmmMonitor{
      new Date(entry.lastVerifiedAt).toISOString():undefined,
     refreshFailures:entry?.refreshFailures??0,
     refreshing:entry?.refreshing??false,
-    notReadyForMs:value.ok?null:Math.max(0,now-(entry?.notReadySince??now))};
+    notReadyForMs:value.ok?null:Math.max(0,now-(entry?.notReadySince??now)),
+    refreshDurationMs:entry?.refreshDurationMs??null,
+    reindexing:entry?.reindexing??false,
+    readTimedOut:entry?.readTimedOut??false,
+    lastTimeoutAt:entry?.lastTimeoutAt?
+     new Date(entry.lastTimeoutAt).toISOString():undefined,
+    readySince:entry?.readySince?new Date(entry.readySince).toISOString():undefined,
+    continuousReadyMs:value.ok&&entry?.readySince!==undefined?
+     Math.max(0,now-entry.readySince):null};
   });
   const reasonCounts:Record<string,number>={};
   for(const p of perPool)if(p.status!=='ready'){
@@ -661,6 +678,12 @@ export class MeteoraDlmmMonitor{
    reasonCounts[reason]=(reasonCounts[reason]??0)+1;
   }
   const ages=perPool.map(p=>p.oldestAgeMs).filter((n):n is number=>n!==null);
+  const durations=[...this.timings].sort((a,b)=>a-b);
+  const durationP95=durations.length?
+   durations[Math.max(0,Math.ceil(durations.length*0.95)-1)]:0;
+  const durationAvg=durations.length?
+   Math.round(durations.reduce((sum,x)=>sum+x,0)/durations.length):0;
+  const outstanding=[...this.rpcReads.values()];
   return {status:this.status,tracked:this.candidates.length,
    ready:perPool.filter(x=>x.status==='ready').length,
    bootstrapAttempts:this.bootstrapAttempts,bootstrapFailures:this.bootstrapFailures,
@@ -675,7 +698,18 @@ export class MeteoraDlmmMonitor{
    effectiveRefreshMs:this.effectiveRefreshMs,
    oldestAccountAgeMs:ages.length?Math.max(...ages):null,
    reasonCounts,recoveryCount:this.recoveryCount,
-   backoffPools:[...this.entries.values()].filter(e=>(e.retryAfter??0)>now).length};
+   backoffPools:[...this.entries.values()].filter(e=>(e.retryAfter??0)>now).length,
+   schedulerTicks:this.schedulerTicks,dispatchedLastTick:this.dispatchedLastTick,
+   skippedInFlight:this.skippedInFlight,skippedCapacity:this.skippedCapacity,
+   skippedBackoff:this.skippedBackoff,outstandingRpcReads:this.rpcReads.size,
+   oldestOutstandingRpcMs:outstanding.length?
+    Math.max(...outstanding.map(x=>Math.max(0,now-x.startedAt))):0,
+   rpcDeadlineMs:this.rpcDeadlineMs,rpcTimedOut:this.rpcTimedOut,
+   rpcLateSettled:this.rpcLateSettled,partialRefreshes:this.partialRefreshes,
+   refreshDurationMsP95:durationP95,refreshDurationMsAvg:durationAvg,
+   reindexInFlight:this.reindexes.size,reindexAttempts:this.reindexAttempts,
+   reindexSuccesses:this.reindexSuccesses,reindexFailures:this.reindexFailures,
+   reindexTimedOut:this.reindexTimedOut,bootstrapInFlight:this.pending.size};
  }
  stop(){
   this.running=false;if(this.timer)clearInterval(this.timer);
