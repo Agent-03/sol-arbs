@@ -2,6 +2,7 @@ import {Connection,PublicKey,type AccountInfo} from '@solana/web3.js';
 import {decodeAmmV4,decodeVault,quoteV4,type AmmV4State,type AmmV4Quote} from './ammV4.js';
 import {SOL_MINT,USDC_MINT,type DiscoveredPool} from './discovery.js';
 import {RAYDIUM_AMM_V4} from './routes.js';
+import type {MarketDataFeed} from './marketData.js';
 
 const TOKEN_PROGRAM='TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 const AMM_AUTHORITY=PublicKey.findProgramAddressSync(
@@ -13,6 +14,7 @@ type WatchedPool={
  vaults:[string,string];
  components:Map<string,Component>;
  ids:number[];
+ releases:(()=>void)[];
  reason?:string;
 };
 export type LiveRaydiumEvent={
@@ -39,6 +41,7 @@ export type LiveRaydiumSnapshot={
  */
 export class LiveRaydiumMonitor{
  private watched=new Map<string,WatchedPool>();
+ private feedListener?:()=>void;
  private lastAttachAttempts=new Map<string,number>();
  private quotes=new Map<string,AmmV4Quote[]>();
  private errors:string[]=[];
@@ -59,7 +62,8 @@ export class LiveRaydiumMonitor{
   private readonly maxAccountAgeMs:number,
   private readonly minLiquidityUsd:number,
   private readonly reconciliationMs:number,
-  private readonly onEvent:(event:LiveRaydiumEvent)=>void
+  private readonly onEvent:(event:LiveRaydiumEvent)=>void,
+  private readonly feed?:MarketDataFeed
  ){}
  private supported():DiscoveredPool[]{
   return this.pools.filter(p=>p.owner===RAYDIUM_AMM_V4&&
@@ -72,6 +76,8 @@ export class LiveRaydiumMonitor{
  private async remove(pool:WatchedPool){
   this.watched.delete(pool.address);
   this.quotes.delete(pool.address);
+  for(const release of pool.releases)release();
+  this.feed?.clearDependencies(pool.address);
   await Promise.allSettled(pool.ids.map(id=>this.connection.removeAccountChangeListener(id)));
  }
  private setComponent(pool:WatchedPool,address:string,info:AccountInfo<Buffer>,slot:number,source:'websocket'|'reconcile',receivedAt=Date.now()){
@@ -167,11 +173,20 @@ export class LiveRaydiumMonitor{
    throw new Error('invalid Raydium AMM owner for '+source.address);
   const state=decodeAmmV4(source.address,account.value.data);
   const pool:WatchedPool={address:source.address,vaults:[state.baseVault,state.quoteVault],
-   components:new Map(),ids:[]};
+   components:new Map(),ids:[],releases:[]};
   this.watched.set(source.address,pool);
   const addresses=[pool.address,...pool.vaults];
   try{
+   if(this.feed){
+    this.feed.expectOwner(pool.address,RAYDIUM_AMM_V4);
+    for(const address of pool.vaults)this.feed.expectOwner(address,TOKEN_PROGRAM);
+    this.feed.setDependencies(pool.address,addresses);
+   }
    for(const address of addresses){
+    if(this.feed){
+     pool.releases.push(this.feed.watch(address));
+     continue;
+    }
     const id=this.connection.onAccountChange(new PublicKey(address),(info,context)=>{
      if(!this.running||this.watched.get(pool.address)!==pool)return;
      this.setComponent(pool,address,info,context.slot,'websocket',Date.now());
@@ -209,11 +224,32 @@ export class LiveRaydiumMonitor{
    pool.components.set(address,{data:Buffer.from(accounts[i].data),slot:result.context.slot,receivedAt});
   }
   this.reconciliations++;
+  // Reconciliation is atomic per RPC context for this three-account set.
+  // Send observations to the shared cache; same-slot duplicate reads do
+  // not advance its market-data timestamp.
+  if(this.feed){
+   for(let i=0;i<3;i++)this.feed.ingest(keys[i].toBase58(),accounts[i],
+    result.context.slot,'rpc_reconcile',receivedAt);
+  }
   this.recompute(pool,result.context.slot,receivedAt,'reconcile');
  }
  async start(){
   if(this.running)return;
   this.running=true;this.bootstrapping=true;
+  if(this.feed)this.feedListener=this.feed.onUpdate(update=>{
+   if(!this.running)return;
+   for(const poolId of update.affectedPools){
+    const pool=this.watched.get(poolId);
+    if(!pool||![pool.address,...pool.vaults].includes(update.address))continue;
+    const info:AccountInfo<Buffer>={
+     data:Buffer.from(update.data),owner:new PublicKey(update.owner),
+     lamports:0,executable:false,rentEpoch:0
+    };
+    this.setComponent(pool,update.address,info,update.slot,
+     update.source==='websocket'||update.source==='geyser'?'websocket':'reconcile',
+     update.receivedAt);
+   }
+  });
   const sources=this.supported();
   for(const source of sources){
    if(!this.running)break;
@@ -273,7 +309,7 @@ export class LiveRaydiumMonitor{
   return {status:!this.running?'stopped':this.bootstrapping?'bootstrapping':
    Object.keys(reasons).length?'degraded':'ok',
    poolCount:sources.length,readyPools:valid.size,
-   subscriptions:[...this.watched.values()].reduce((sum,p)=>sum+p.ids.length,0),
+   subscriptions:[...this.watched.values()].reduce((sum,p)=>sum+p.ids.length+p.releases.length,0),
    events:this.events,localRecomputations:this.localRecomputations,
    reconciliations:this.reconciliations,lastUpdateAt:this.lastUpdateAt,
    quotes,errors:[...this.errors],poolReasons:reasons,
@@ -283,6 +319,7 @@ export class LiveRaydiumMonitor{
  async stop(){
   this.running=false;
   if(this.timer)clearInterval(this.timer);
+  this.feedListener?.();this.feedListener=undefined;
   for(const pool of [...this.watched.values()])await this.remove(pool);
  }
 }
