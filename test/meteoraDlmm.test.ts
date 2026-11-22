@@ -22,10 +22,10 @@ test('C3D.4 accepts Meteora DLMM as exact local SDK graph edge, never CPMM reser
   observedAt:at,poolSlot:100,vaultSlot:100,liquidityUsd:900000,
   snapshotIntegrity:'bounded_slot_research' as const
  };
- let input:bigint|undefined,from:string|undefined;
+ const calls:Array<{input:bigint;from:string}>=[];
  const dlmm:GraphPool={...common,address:pk(121),program:'meteora_dlmm',
   quoteExactInput:(mint,raw)=>{
-   from=mint;input=raw;
+   calls.push({from:mint,input:raw});
    return raw*2000n;
   }};
  const raydium:GraphPool={...common,address:pk(122),tokenA:token,tokenB:'SOL',
@@ -35,8 +35,7 @@ test('C3D.4 accepts Meteora DLMM as exact local SDK graph edge, never CPMM reser
   const r=evaluateGraphCycles([dlmm,raydium],config,now);
   assert.equal(r.eligiblePools,2);
   assert.ok(r.twoLegCycles>0);
-  assert.equal(from,'SOL');
-  assert.ok(input!==undefined);
+  assert.ok(calls.some(c=>c.from==='SOL'&&c.input===50000000n));
   assert.ok(r.candidates.some(c=>c.hops.some(h=>h.program==='meteora_dlmm')));
   assert.equal(r.candidates[0].hops[1].amountInRaw,
    r.candidates[0].hops[0].amountOutRaw);
