@@ -160,7 +160,7 @@ export class MarketEngine {
   if(!this.running)return;
   const active=new Set(this.pools.map(p=>p.address));
   const rayQuotes=this.ray.snapshot().quotes.filter(q=>active.has(q.pool));
-  const orcaLegs=this.orca.snapshot().quotedLegs.filter(q=>active.has(q.pool));
+  const orcaLegs=this.orca.snapshot().quotedLegs.filter(q=>active.has(q.pool)&&!q.invalidated);
   const liquidity=new Map(this.pools.map(p=>[p.address,p.liquidityUsd] as const));
   const clmmBuys=this.clmm.getBuys();
   this.combination=combineLiveQuotes(rayQuotes,orcaLegs,
@@ -493,6 +493,7 @@ export class MarketEngine {
    orca:{status:o.status,poolCount:o.orcaPools,quotedLegs:o.quotedLegs.length,
     quoteState:o.quoteState,freshLegs:o.freshLegs,expiredLegs:o.expiredLegs,
     quoteMode:o.quoteMode,lastScanDurationMs:o.lastScanDurationMs,
+    invalidatedPools:o.invalidatedPools,skippedUnquotablePools:o.skippedUnquotablePools,
     lastFirstBuyDelayMs:o.lastFirstBuyDelayMs,
     lastBuyCount:o.lastBuyCount,lastReverseCount:o.lastReverseCount,
     lastPoolSetupMs:o.lastPoolSetupMs,
