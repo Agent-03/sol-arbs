@@ -43,6 +43,11 @@ export function parseOrcaGraphCandidates(payload:unknown):Candidate[]{
 export type ConcentratedSnapshot={
  trackedOrca:number;trackedClmm:number;readyOrca:number;readyClmm:number;
  validatedOrca:number;validatedClmm:number;quotesAttempted:number;quoteMisses:number;
+ orcaPools:Array<{pool:string;pair:string;state:'ready'|'not_ready';reason?:string}>;
+ clmmPools:Array<{pool:string;pair:string;status:string;reason?:string;
+  lastObservedAt?:string;ageMs?:number;tickArrays:number;slot:number|null;
+  tickArraySlot:number|null;tickArraySlotVerified:boolean}>;
+ clmmScan:{status:string;scans:number;lastUpdatedAt?:string;activeTickSubscriptions:number};
  discoveryErrors:string[];
 };
 /** C3C independent, strictly read-only concentrated-liquidity adapter.
@@ -56,6 +61,8 @@ export class C3Concentrated{
  private readonly orcaReleases=new Map<string,()=>void>();
  private orcaValidated=0;
  private clmmValidated=0;
+ private clmmStarted=false;
+ private orcaFailures=new Map<string,string>();
  private running=false;private refreshing=false;
  private timer?:ReturnType<typeof setInterval>;
  private failures:string[]=[];
@@ -105,8 +112,13 @@ export class C3Concentrated{
    address:x.address,owner:RAYDIUM_CLMM,venue:'raydium',liquidityUsd:x.liquidityUsd
   }));
   this.clmm.replacePools(listed);
-  // SDK bootstrap is async and bounded by the shared HTTP rate limiter.
-  await this.clmm.scanOnce();
+  // Do not start the CLMM timer with an empty candidate universe: the
+  // initial SDK initialization may otherwise occupy the scan lock while the
+  // real candidate list arrives, silently skipping the first bootstrap.
+  if(!this.clmmStarted&&selected.length){
+   this.clmmStarted=true;
+   this.clmm.start();
+  }else if(this.clmmStarted)await this.clmm.scanOnce();
   this.notify();
  }
  private async discoverOrca(){
@@ -147,10 +159,12 @@ export class C3Concentrated{
    const keep=new Set(verified.map(x=>x.address));
    for(const [addr,release] of this.orcaReleases)if(!keep.has(addr)){
     this.orca.forget(addr);release();this.orcaReleases.delete(addr);this.pools.delete(addr);
+    this.orcaFailures.delete(addr);
    }
    for(const c of verified){
     this.pools.set(c.address,c);
-    try{await this.orca.prepare(c.address)}catch(err){this.error('Orca '+c.address+': '+String(err))}
+    try{await this.orca.prepare(c.address);this.orcaFailures.delete(c.address)}
+    catch(err){this.orcaFailures.set(c.address,String(err));this.error('Orca '+c.address+': '+String(err))}
    }
    this.notify();
   }catch(error){this.error('C3C Orca discovery: '+String(error))}
@@ -159,7 +173,6 @@ export class C3Concentrated{
  start(){
   if(this.running)return;
   this.running=true;
-  this.clmm.start();
   void this.discoverOrca();
   this.timer=setInterval(()=>{void this.discoverOrca()},this.opts.refreshMs);
  }
@@ -189,18 +202,41 @@ export class C3Concentrated{
     }
    });
   }
+  // Diagnostics report every tracked concentrated pool, including those
+  // excluded before the graph evaluator sees them. No silent readiness loss.
+  const clmmStatus=this.clmm.snapshot();
+  const orcaPools=[...this.pools.values()]
+   .filter(c=>c.program==='orca_whirlpool').map(c=>{
+    const ready=this.orca.graphSnapshot(c.address,now)!==null;
+    return {pool:c.address,pair:c.tokenA+'/'+c.tokenB,
+     state:ready?'ready' as const:'not_ready' as const,
+     reason:ready?undefined:this.orcaFailures.get(c.address)??
+      'tick_arrays_missing_or_snapshot_stale_or_slot_skew'};
+   });
+  const clmmPools=clmmStatus.perPool.map(row=>{
+   const pool=this.pools.get(row.pool);
+   return {pool:row.pool,pair:pool?pool.tokenA+'/'+pool.tokenB:'unknown',
+    status:row.status,reason:row.reason,lastObservedAt:row.lastObservedAt,
+    ageMs:row.ageMs,tickArrays:row.tickArrays,slot:row.slot??null,
+    tickArraySlot:row.tickArraySlot??null,
+    tickArraySlotVerified:row.tickArraySlotVerified??false};
+  });
   return {pools,health:{
    trackedOrca:[...this.pools.values()].filter(p=>p.program==='orca_whirlpool').length,
    trackedClmm:[...this.pools.values()].filter(p=>p.program==='raydium_clmm').length,
    readyOrca,readyClmm,validatedOrca:this.orcaValidated,
    validatedClmm:this.clmmValidated,quotesAttempted:this.quoteAttempts,
-   quoteMisses:this.quoteMisses,discoveryErrors:[...this.failures,...this.clmm.snapshot().errors].slice(0,8)
+   quoteMisses:this.quoteMisses,orcaPools,clmmPools,
+   clmmScan:{status:clmmStatus.status,scans:clmmStatus.scans,
+    lastUpdatedAt:clmmStatus.lastUpdatedAt,
+    activeTickSubscriptions:clmmStatus.activeTickSubscriptions??0},
+   discoveryErrors:[...this.failures,...clmmStatus.errors].slice(0,8)
   }};
  }
  stop(){
   this.running=false;
   if(this.timer)clearInterval(this.timer);
-  this.orca.stop();this.clmm.stop();
+  this.orca.stop();this.clmm.stop();this.clmmStarted=false;this.orcaFailures.clear();
   for(const release of this.orcaReleases.values())release();
   this.orcaReleases.clear();this.pools.clear();
  }
