@@ -1,5 +1,13 @@
 import {PublicKey,type Connection} from '@solana/web3.js';
-import DLMM,{type BinArrayAccount} from '@meteora-ag/dlmm';
+import {createRequire} from 'node:module';
+import type * as MeteoraTypes from '@meteora-ag/dlmm';
+import type {BinArrayAccount} from '@meteora-ag/dlmm';
+// Published SDK ESM entry cannot load its Anchor CommonJS directory imports
+// under NodeNext. Resolve the package's supported CommonJS entry explicitly.
+// Its CJS export is the DLMM class itself, not {default: DLMM}.
+const DLMM=createRequire(import.meta.url)('@meteora-ag/dlmm')
+ as typeof MeteoraTypes.default.default;
+type DLMM=InstanceType<typeof MeteoraTypes.default.default>;
 import BN from 'bn.js';
 import {METEORA_DLMM,type RegistryPool} from './c3PoolRegistry.js';
 import {GRAPH_ASSETS,assetOfMint,type GraphPool} from './c3Graph.js';
