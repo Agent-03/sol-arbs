@@ -3,7 +3,7 @@ import {Connection,PublicKey,type AccountInfo} from '@solana/web3.js';
 
 export type MarketSource='websocket'|'rpc_poll'|'rpc_reconcile'|'rpc_bootstrap'|'geyser';
 export type MarketObservation={
- address:string; owner:string; data:Buffer; lamports:number; executable:boolean; rentEpoch:number;
+ address:string; owner:string; data:Buffer; lamports:number; executable:boolean; rentEpoch?:number;
  slot:number; receivedAt:number;
  source:MarketSource; hash:string; verifiedAt:number;
 };
