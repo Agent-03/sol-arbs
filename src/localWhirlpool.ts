@@ -293,7 +293,8 @@ export class LocalWhirlpoolQuoter{
     ?'insufficient_tick_array_traversal_for_input'
     :raw;
    this.lastErrorReason.set(pool,normalized);
-   if(this.failureGate.reject(pool,direction,inputRaw,componentKey,normalized))
+   if(this.failureGate.reject(pool,direction,inputRaw,componentKey,normalized)&&
+      normalized!=='insufficient_tick_array_traversal_for_input')
     this.error('Local Whirlpool '+pool+' '+direction+' input='+inputRaw+': '+normalized);
    return null;
   }
