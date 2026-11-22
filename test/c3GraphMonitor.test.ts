@@ -94,7 +94,7 @@ test('C3B bootstrap uses bounded RPC and recomputes from websocket bytes without
   await new Promise<void>(resolve=>setTimeout(resolve,80));
   const before=graph.snapshot();
   assert.equal(before.trackedPools,3);
-  assert.deepEqual(before.discoveryStats,{apiCandidates:3,validatedV4:3,selected:3});
+  assert.deepEqual(before.discoveryStats,{apiCandidates:3,validatedV4:3,validatedCpmm:0,selected:3});
   assert.equal(before.watchedAccounts,9);
   assert.equal(subs,9);
   assert.equal(before.rpcReconciles,1);
