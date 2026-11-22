@@ -260,3 +260,56 @@ Leave your existing Helius/Alchemy/Jupiter keys unchanged and private. The dashb
 A stable research dashboard is not an atomic arbitrage bot. For actionable evaluation we still need coherent slot-pinned account snapshots, SDK parity tests, Raydium CLMM support if desired, actual dual-swap transaction construction, transaction simulation, and measured fee/landing/slippage impacts. Long per-quote RPC reads are acceptable for diagnosis but not low-latency execution. No real-money deployment should occur based on Phase B4 alone.
 
 After pulling, run `npm.cmd install`, `npm.cmd run build`, `npm.cmd test`, and `npm.cmd run dev`. The repository changes and tests are committed; they must still pass your local build and live provider validation.
+
+
+## Phase B5 — Event-driven read-only route detection
+
+Open the existing dashboard at **`http://127.0.0.1:8787/`**. B5 replaces the old *full Raydium HTTP scan before every Orca refresh* with a WebSocket-backed Raydium pool/vault state cache and an incremental local two-leg route combiner.
+
+### Exact scope implemented
+
+1. **Live Raydium AMM v4 feed:** Subscribe to the AMM state and both legacy SPL-token vault accounts for each supported liquid SOL/USDC pool. Start by validating/reading all three accounts in one on-chain RPC context after subscriptions; refresh that coherent-context snapshot periodically to recover missed WebSocket events. Valid account changes recalculate the configured USD notionals locally **without an HTTP RPC call on the WebSocket hot path**. Require all component data, verified account ownership/mints/vault authority, bounded component age, and limited slot skew.
+2. **Orca Whirlpool:** Continue using the installed Orca SDK quote engine for Whirlpool/tick-array calculations; it is *not yet a fully memory-resident quote engine*. Refresh on a bounded cadence or a changed Orca pool, with coalescing and a minimum trigger cooldown. **Publish each completed Orca leg as soon as it is available** rather than waiting for the whole scan. Quote freshness is conservatively anchored to the pool account observation, not to the later SDK computation time.
+3. **Local route combiner:** On every Raydium local recomputation or newly published Orca leg, calculate Orca buy → Raydium sell using the current Raydium reserves and the **exact SOL output** of the Orca buy. Raydium buy → Orca sell is evaluated **only** if an SDK reverse quote has exactly the same input amount as the newest Raydium buy output. Never silently round, approximate, or treat a different quote as contiguous.
+4. **Freshness and integrity:** Preserve Phase B4 maximum age, time gap, slot skew and liquidity checks. Outdated quotes and different-state inputs are excluded from qualifying research comparisons. Every candidate retains `classification: "indicative_only"`, and `executableRoutes` remains **0**.
+5. **Dashboard metrics:** Actual WebSocket state events, local recomputations and route evaluations, callback-to-local-evaluation p50/p95 milliseconds, ready Raydium pool/vault state count, Orca SDK progress, unmatched exact-input reverse quotes, provider rate-limit/failover counters, stale/unaligned exclusions, and clear explanatory empty states. The panel explicitly distinguishes **unprofitable** from **no data** and **stale data**.
+
+### Why this is not a professional execution bot yet
+
+- **Raydium AMM v4 open orders:** Our CPMM research quotes use legacy SPL token vault reserves after pending-PNL adjustment, and **do not yet reconcile any OpenBook/open-orders balances**. They are approximate, and simulated execution may differ. No result should be considered an exact on-chain swap output.
+- **Orca tick-array freshness:** The SDK fetcher caches tick arrays across requested sizes, and pools/tick arrays are read via RPC. Pool observation slots do not prove all tick arrays were captured at the same slot.
+- **WebSocket reception latency:** The reported `evaluation p95` measures milliseconds from **receipt of a local WebSocket callback to completion of in-memory route evaluation**. It is NOT chain-to-node end-to-end latency, the exchange reaction time, or landing latency.
+- **No guaranteed spread:** The instrument universe remains **SOL/USDC** and the quote adapters remain **Raydium AMM v4 and Orca Whirlpool**. Raydium CLMM, DLMM, multihop tokens, Jito bundle execution, simulation, priority fee estimation, wallet use and transaction submission are **not implemented**. A zero-profit/zero-comparable result can be a legitimate outcome even when the event feed is healthy.
+- **Read-only research:** Absolutely no transaction signing, wallet loading, broadcasting or orders were added. Helius primary / Alchemy backup remains HTTP-only failover; WebSocket stays on the configured primary.
+
+### B5 configuration
+
+Append or customize in your local `.env` (existing credentials remain private):
+
+```dotenv
+B5_QUOTE_SIZES_USD=5,10,25
+B5_RAYDIUM_RECONCILE_MS=12000
+B5_MAX_COMPONENT_AGE_MS=20000
+B5_ORCA_REFRESH_MS=15000
+B5_ORCA_EVENT_COOLDOWN_MS=12000
+B4_MAX_QUOTE_AGE_MS=15000
+B4_MAX_QUOTE_GAP_MS=4000
+B4_MAX_SLOT_SKEW=12
+B4_MIN_POOL_LIQUIDITY_USD=10000
+```
+
+`B5_QUOTE_SIZES_USD` is deliberately independent of Jupiter's quote sizes. More quote sizes/Orca pools mean more SDK requests and potentially stale observations. Tightening freshness thresholds will increase exclusions; **don't relax them just to make positive P&L appear**.
+
+### Run and verify
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Then open `http://127.0.0.1:8787/` and inspect `GET /api/dashboard` or `GET /arb`. Check `b5.marketEvents`, `b5.localEvaluations`, `b5.latency.p95Ms`, `b5.raydiumReadyPools`, `orca.quotedLegs`, `opportunities.excludedByReason` and `rpc.primary.rateLimits`. `GET /amm-v4` reports the Raydium WebSocket cache and reconciling health.
+
+**Validation status:** B5 source, dashboard and fixture-based tests are committed. They still require the local TypeScript build, full unit suite, and live RPC/WebSocket run for verification. Do not enable real-money trading on this version.
