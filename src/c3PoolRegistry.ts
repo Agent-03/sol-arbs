@@ -49,7 +49,7 @@ const OWNERS:Record<string,{program:RegistryProgram;venue:RegistryVenue}>={
  [PUMPSWAP_AMM]:{program:'pumpswap_amm',venue:'pumpswap'}
 };
 const QUOTABLE=new Set<RegistryProgram>([
- 'raydium_amm_v4','raydium_cpmm','raydium_clmm','orca_whirlpool'
+ 'raydium_amm_v4','raydium_cpmm','raydium_clmm','orca_whirlpool','meteora_dlmm'
 ]);
 const pubkey=(value:unknown):string|undefined=>{
  if(typeof value!=='string')return;
@@ -156,6 +156,7 @@ export class C3PoolRegistry{
  private queried=0;private candidates=0;private verified=0;
  private ownerRejected=0;private mintRejected=0;
  private ready=new Set<string>();
+ private readinessReasons=new Map<string,string>();
  private status:PoolRegistrySnapshot['status']='warming';
  constructor(private readonly rpc:Connection,private readonly opts:{
   enabled:boolean;maxTokensPerRefresh:number;concurrency:number;
@@ -186,8 +187,9 @@ export class C3PoolRegistry{
   this.refreshTask=this.perform(allowed,now).finally(()=>{this.refreshTask=undefined});
   await this.refreshTask;
  }
- observeReady(pools:readonly GraphPool[]){
+ observeReady(pools:readonly GraphPool[],reasons?:ReadonlyMap<string,string>){
   this.ready=new Set(pools.map(p=>p.address));
+  this.readinessReasons=new Map(reasons??[]);
  }
  private prune(now:number,allowed:Set<string>){
   for(const [id,p] of this.rows){
@@ -290,7 +292,7 @@ export class C3PoolRegistry{
    return {...p,quoteStatus:(ready?'ready':QUOTABLE.has(p.program)?
     'not_ready':'unsupported') as RegistryPool['quoteStatus'],
     quoteReason:ready?'':QUOTABLE.has(p.program)?
-     'local_quote_snapshot_missing_or_stale':'protocol_quote_adapter_not_yet_implemented'};
+     this.readinessReasons.get(p.address)??'local_quote_snapshot_missing_or_stale':'protocol_quote_adapter_not_yet_implemented'};
   }).sort((a,b)=>b.liquidityUsd-a.liquidityUsd||a.address.localeCompare(b.address));
   const byMint=new Map<string,TokenPoolCoverage>();
   for(const mint of this.tokens)byMint.set(mint,{
@@ -352,5 +354,5 @@ export class C3PoolRegistry{
    pools:rows,tokens,errors:[...this.errors]};
  }
  supported():RegistryPool[]{return this.snapshot().pools.filter(p=>QUOTABLE.has(p.program))}
- stop(){this.ready.clear();this.rows.clear();this.tokens=[];this.status='disabled'}
+ stop(){this.ready.clear();this.readinessReasons.clear();this.rows.clear();this.tokens=[];this.status='disabled'}
 }
