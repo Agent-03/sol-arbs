@@ -89,3 +89,34 @@ Raydium's July 2026 change removed AMM v4 OpenBook liquidity from active reserve
 **Pending verification:** Confirm that quotes match current Raydium SDK quote results on real pool snapshots, including rounding and all status variants. Verify RPC snapshot consistency and supported token extensions before promoting any quote to execution grade. This code has not been run against the user's live credentials. Always run `npm.cmd run build` and `npm.cmd test`.
 
 Phase B3 should add complete Orca Whirlpool tick-array traversal, on-chain fee logic and rigorous two-leg same-slot route simulation before any paper-profit labeling.
+
+
+## Phase B3 — Orca Whirlpool SDK quote-only adapter
+
+New read-only endpoints:
+- `http://127.0.0.1:8787/orca`: official Orca Whirlpool SDK tick-array-aware exact-in quote outputs and errors
+- `http://127.0.0.1:8787/arb`: indicative **two-leg** Raydium AMM v4 ↔ Orca Whirlpool USDC-funded round trips, sorted by calculated margin; always `executableRoutes:0`
+
+The adapter integrates Orca's legacy Web3.js-compatible `@orca-so/whirlpools-sdk` library (with `swapQuoteByInputToken`). The SDK fetches the pool, necessary tick arrays and fee context. For each USDC amount $5, $10, $25, $50, $80, we evaluate Orca buy → Raydium sell and Raydium buy → Orca sell (where possible). Second-leg quotes use the **actual amount output** from the first-leg estimate, not a separately assumed nominal amount.
+
+The SDK requires an Anchor provider, instantiated using a **fresh ephemeral in-memory local identity only**. No user's wallet, seed, or signing credentials are loaded; the program never calls any signer method or sends transactions.
+
+* Read-only monitoring and route math only.
+* Quote responses may be from different slots and different timestamps. Orca's SDK may fetch other accounts/tick arrays internally; snapshot coherence is NOT guaranteed.
+* `JUPITER_ASSUMED_COST_USD` is reused as a flat hypothetical combined execution cost. It does not prove true gas, priority fees, tip requirements, swap landing, transaction success, or MEV competition.
+* A positive `indicativeNetUsd` does **not** mean an executable profit. Every route has `classification: indicative_only` and reasons including non-atomic simulation, independently gathered snapshots and unverified costs.
+* No genuine executability or profitable trading strategy has been validated; this update has not been locally built or exercised against live mainnet here.
+
+### Install and run
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Use `http://127.0.0.1:8787/arb` and share the returned JSON status and errors. Keep `.env` private.
+
+**Phase B3 still requires live verification**: confirm SDK dependency compatibility and tick-array fetch behavior, independently compare SDK quote outputs against chain-derived fixture/replay, and measure quote staleness and provider rate-limits. Future work: coherent snapshot quoting, replay journal, compute-budget/tip modeling, actual atomic route transaction construction and simulation—all before real-money trading.
