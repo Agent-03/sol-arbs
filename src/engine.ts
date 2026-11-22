@@ -57,9 +57,9 @@ export class MarketEngine {
   this.discoveryValidated=discovered.validatedCount??discovered.pools.length;
   this.lastDiscoveryAt=new Date().toISOString();
   this.lastDiscoveryAttempt=Date.now();
-  this.ray=new AmmV4Monitor(conn,this.pools,config.jupiter.sizesUsd,config.ammScanIntervalMs,config.ammMaxSlotSkew);
+  this.ray=new AmmV4Monitor(conn,this.pools,config.jupiter.sizesUsd,config.ammScanIntervalMs,config.ammMaxSlotSkew,config.minQuoteLiquidityUsd);
   this.orca=new OrcaMonitor(conn,this.pools,config.jupiter.sizesUsd,
-   ()=>this.ray.snapshot().quotes,config.jupiter.assumedCostUsd,config.orcaScanIntervalMs);
+   ()=>this.ray.snapshot().quotes,config.jupiter.assumedCostUsd,config.orcaScanIntervalMs,config.minQuoteLiquidityUsd);
   this.note('info','startup','Monitoring initialized for SOL/USDC. No execution or wallet operations enabled.');
  }
  private note(level:Activity['level'],kind:string,message:string){
@@ -223,7 +223,8 @@ export class MarketEngine {
     intervalMs:this.discoveryInterval(),reason:this.lastDiscoveryReason,
     validatedCandidates:this.discoveryValidated,trackedPools:this.pools.length,
     newlyAdded:this.discoveryAdded,removed:this.discoveryRemoved,
-    quoteSupportedPools:programCounts.raydiumV4+programCounts.orcaWhirlpool,
+    quoteSupportedPools:this.pools.filter(p=>[RAYDIUM_AMM_V4,ORCA_WHIRLPOOL].includes(p.owner) && (p.liquidityUsd===undefined||p.liquidityUsd>=this.config.minQuoteLiquidityUsd)).length,
+    lowLiquidityExcluded:this.pools.filter(p=>[RAYDIUM_AMM_V4,ORCA_WHIRLPOOL].includes(p.owner) && p.liquidityUsd!==undefined && p.liquidityUsd<this.config.minQuoteLiquidityUsd).length,
     coverage:programCounts,
     theoreticalTopologies:this.topology.candidates.length,
     warnings:this.discoveryWarnings},
