@@ -17,7 +17,8 @@ async function main(){
  const config=loadConfig();
  const manualPools=[...config.pools];
  const jupiter=new JupiterMonitor(config.jupiter);
- const rpcLimiter=new RpcProviderPool(config.rpcUrl,config.backupRpcUrl,config.rpcLimit);
+ const rpcLimiter=new RpcProviderPool(config.rpcUrl,config.backupRpcUrl,config.rpcLimit,
+  globalThis.fetch,{dualActive:config.dualRpcEnabled,secondaryOptions:config.secondaryRpcLimit});
  const connection=new Connection(config.rpcUrl,{
   commitment:'confirmed',wsEndpoint:config.wsUrl,fetch:rpcLimiter.fetch,disableRetryOnRateLimit:true
  });
@@ -27,11 +28,18 @@ async function main(){
  const marketData=new MarketDataFeed(connection,config.freshness.maxAgeMs,config.freshness.maxSlotSkew);
  const scanner=new Scanner(config,connection,marketData);
  const c3Graph=new C3GraphMonitor(connection,marketData,{
-  enabled:config.c3GraphEnabled,maxPools:config.c3GraphMaxPools,
-  perPair:config.c3GraphPerPair,refreshMs:config.c3GraphRefreshMs,
+  enabled:config.c3GraphEnabled,
+  maxPools:config.c3dEnabled?Math.max(config.c3GraphMaxPools,80):config.c3GraphMaxPools,
+  perPair:config.c3GraphPerPair,
+  refreshMs:config.c3dEnabled?config.c3dPoolRefreshMs:config.c3GraphRefreshMs,
   reconcileMs:config.c3GraphReconcileMs,sizesUsd:config.c3GraphSizesUsd,
+  dynamicDiscoveryEnabled:config.c3dEnabled,maxTokens:config.c3dMaxTokens,
+  tokenRefreshMs:config.c3dTokenRefreshMs,poolRequestBudget:config.c3dPoolQueryBudget,
+  poolQueryConcurrency:config.c3dPoolConcurrency,apiKey:config.jupiter.apiKey,
+  sizesSol:config.c3dSizesSol,assumedCostSol:config.c3dAssumedCostSol,
   maxPathChecks:config.c3GraphMaxPathChecks,maxResults:config.c3GraphMaxResults,
-  minLiquidityUsd:config.c3GraphMinLiquidityUsd,
+  minLiquidityUsd:config.c3dEnabled?config.c3dMinPoolLiquidityUsd:
+   config.c3GraphMinLiquidityUsd,
   maxPoolInputShareBps:config.c3GraphMaxPoolInputBps,
   maxQuoteAgeMs:config.freshness.maxAgeMs,
   maxQuoteGapMs:config.freshness.maxGapMs,
@@ -90,6 +98,7 @@ async function main(){
    if(path==='/api/c2'){send(200,{phase:'C2',readOnly:true,...dashboard().c2,executableRoutes:0});return;}
    if(path==='/api/c3'){send(200,history.snapshot());return;}
    if(path==='/api/c3/graph'){send(200,c3Graph.snapshot());return;}
+   if(path==='/api/c3/tokens'){send(200,c3Graph.snapshot().tokenDiscovery);return;}
    if(path==='/api/market-data'){send(200,{phase:'C1',readOnly:true,...marketData.snapshot(),warning:'Account-state cache only; SDK tick arrays may be older or from unrelated RPC contexts.'});return;}
    if(path==='/api/explorer'){
     const d=dashboard();
