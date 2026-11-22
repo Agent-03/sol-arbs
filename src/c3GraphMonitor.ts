@@ -271,6 +271,10 @@ export class C3GraphMonitor{
     await this.tokenUniverse.refresh();
     if(!this.running)return;
     const tokens=this.tokenUniverse.getTokens();
+    // The pinned bridge assets already have dedicated anchor-pair queries.
+    // Do not let USDC/USDT/JUP consume the rotating new-token query budget.
+    const dynamicTokens=tokens.filter(t=>t.mint!==GRAPH_ASSETS.USDC.mint&&
+     t.mint!==GRAPH_ASSETS.USDT.mint&&t.mint!==GRAPH_ASSETS.JUP.mint);
     replaceDynamicGraphAssets(tokens);
     this.concentrated.setAllowedMints(Object.values(GRAPH_ASSETS).map(x=>x.mint));
     // SOL is always the route root. USDC and USDT are bridge assets.
@@ -282,8 +286,8 @@ export class C3GraphMonitor{
     // Retain the highest-priority five tokens every refresh, and rotate the
     // remainder. No top-token monopoly over the bounded API query budget.
     const capacity=Math.max(0,Math.floor((budget-pairs.length)/2));
-    const priority=tokens.slice(0,Math.min(5,capacity));
-    const rotating=tokens.slice(priority.length);
+    const priority=dynamicTokens.slice(0,Math.min(5,capacity));
+    const rotating=dynamicTokens.slice(priority.length);
     const round=rotating.length?this.rotation%rotating.length:0;
     const selected=[...priority];
     for(let i=0;i<rotating.length&&selected.length<capacity;i++)
