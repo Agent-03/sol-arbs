@@ -130,7 +130,9 @@ export class ChainHistorySampler{
    this.counts.transactionsRequested++;
    try{
     const parsed=await this.rpc.getParsedTransaction(signature,{
-     commitment:'confirmed',maxSupportedTransactionVersion:0
+     // Mainnet can return v1 transactions; restricting this to 0 rejects
+     // valid parsed transactions before we can analyze any token balances.
+     commitment:'confirmed',maxSupportedTransactionVersion:1
     });
     if(!parsed){this.counts.missingTransactions++;continue;}
     const evidence=analyzeChainTransaction(signature,seedPool,parsed);
