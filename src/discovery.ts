@@ -18,12 +18,12 @@ export function parseRaydium(value:unknown):Array<{address:string;liquidityUsd?:
  });
 }
 export function parseOrca(value:unknown):Array<{address:string;liquidityUsd?:number}>{
- const root=obj(value);const arr=Array.isArray(root?.data)?root.data:Array.isArray(root?.pools)?root.pools:Array.isArray(root?.data)&&Array.isArray(obj(root.data)?.pools)?obj(root.data)?.pools:undefined;
+ const root=obj(value);const nested=obj(root?.data);const arr=Array.isArray(root?.data)?root.data:Array.isArray(root?.pools)?root.pools:Array.isArray(nested?.pools)?nested.pools:Array.isArray(nested?.data)?nested.data:undefined;
  if(!Array.isArray(arr))return [];
  return arr.flatMap((value:unknown)=>{
   const p=obj(value);if(!p)return [];
-  const a=mint(p.tokenMintA??p.token_mint_a??p.tokenA?.toString()??p.token_a);
-  const b=mint(p.tokenMintB??p.token_mint_b??p.tokenB?.toString()??p.token_b);
+  const a=mint(p.tokenMintA??p.token_mint_a??p.tokenA??p.token_a);
+  const b=mint(p.tokenMintB??p.token_mint_b??p.tokenB??p.token_b);
   const id=address(p.address??p.id??p.whirlpool);
   if(!id||!((a===SOL_MINT&&b===USDC_MINT)||(a===USDC_MINT&&b===SOL_MINT)))return [];
   const tvl=Number(p.tvlUsdc??p.tvlUsd??p.tvl);
