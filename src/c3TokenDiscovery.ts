@@ -26,8 +26,21 @@ const toObject=(x:unknown):Record<string,unknown>|null=>
 const asRows=(value:unknown):unknown[]=>{
  if(Array.isArray(value))return value;
  const p=toObject(value);
- return Array.isArray(p?.data)?p.data:Array.isArray(toObject(p?.data)?.tokens)?
-  toObject(p?.data)!.tokens as unknown[]:[];
+ if(Array.isArray(p?.data))return p.data;
+ if(Array.isArray(p?.tokens))return p.tokens;
+ const nested=toObject(p?.data);
+ if(Array.isArray(nested?.tokens))return nested.tokens;
+ // DexScreener pairs are useful for non-sponsored mid-cap pool activity.
+ // Retain the chain ID for each token before mint validation.
+ if(Array.isArray(p?.pairs))return p.pairs.flatMap(pair=>{
+  const item=toObject(pair);
+  if(!item||item.chainId!=='solana')return [];
+  return [item.baseToken,item.quoteToken].map(token=>{
+   const t=toObject(token);
+   return t?{...t,chainId:'solana',tokenAddress:t.address}:null;
+  }).filter(Boolean);
+ });
+ return [];
 };
 const safeMint=(value:unknown):string|undefined=>{
  if(typeof value!=='string')return;
@@ -105,7 +118,8 @@ export class C3TokenDiscovery{
   ]:[];
   jobs.push(
    {name:'recent',url:'https://api.dexscreener.com/token-profiles/latest/v1',headers:{}},
-   {name:'boosted',url:'https://api.dexscreener.com/token-boosts/top/v1',headers:{}}
+   {name:'boosted',url:'https://api.dexscreener.com/token-boosts/top/v1',headers:{}},
+   {name:'traded',url:'https://api.dexscreener.com/latest/dex/search?q=SOL',headers:{}}
   );
   const results=await Promise.allSettled(jobs.map(j=>fetchJson(j.url,j.headers,this.transport)));
   const scores:Record<TokenCategory,number>={seed:200,recent:140,trending:130,traded:100,boosted:70};
