@@ -16,7 +16,7 @@ export type ArbitrageCandidate={
  id:string;sizeUsd:number;buyVenue:'raydium'|'orca';sellVenue:'raydium'|'orca';
  buyPool:string;sellPool:string;inputUsdcRaw:string;outputUsdcRaw:string;
  grossUsd:number;assumedCostUsd:number;indicativeNetUsd:number;
- buyObservedAt:string;sellObservedAt:string;buySlot:number|null;sellSlot:number|null;buyLiquidityUsd?:number;sellLiquidityUsd?:number;quoteAgeGapMs:number;
+ buyObservedAt:string;sellObservedAt:string;buySlot:number|null;sellSlot:number|null;buyLiquidityUsd?:number;sellLiquidityUsd?:number;raydiumModel?:'amm_v4'|'clmm';quoteAgeGapMs:number;
  classification:'indicative_only';rejectionReasons:string[];
 };
 export type OrcaStatus={status:'idle'|'scanning'|'ok'|'partial_error';lastUpdatedAt?:string;
