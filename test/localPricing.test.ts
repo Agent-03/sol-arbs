@@ -84,3 +84,31 @@ test('C2 unquotable quote cache stays bounded when reverse input amounts change'
  assert.equal(gate.get('a','USDC_TO_SOL',5000000n),undefined);
  assert.ok(gate.get('a','SOL_TO_USDC',2000n));
 });
+
+test('unchanged account bytes retain a fresh verified slot and time after RPC reconciliation',async()=>{
+ const key=new PublicKey(Buffer.alloc(32,90)).toBase58();
+ const owner=new PublicKey(Buffer.alloc(32,91));
+ let slot=100;
+ const info:AccountInfo<Buffer>={data:Buffer.from([1,2,3]),owner,
+  executable:false,lamports:100,rentEpoch:0};
+ const rpc={getMultipleAccountsInfoAndContext:async()=>({
+  context:{slot},value:[info]
+ }),onAccountChange:()=>1,removeAccountChangeListener:async()=>{}
+ } as unknown as Connection;
+ const feed=new MarketDataFeed(rpc,15000,12);
+ try{
+  await feed.reconcile([key],'rpc_bootstrap');
+  const first=feed.get(key)!;
+  assert.equal(first.verifiedSlot,100);
+  slot=120;
+  await feed.reconcile([key],'rpc_reconcile');
+  const second=feed.get(key)!;
+  assert.equal(second.slot,100,'original change slot is preserved');
+  assert.equal(second.verifiedSlot,120,'latest verified RPC slot is retained');
+  assert.ok(second.verifiedAt>=first.verifiedAt);
+  assert.equal(validateLocalComponents([
+   {slot:second.verifiedSlot,receivedAt:second.verifiedAt},
+   {slot:120,receivedAt:Date.now()}
+  ],Date.now(),15000,12).ok,true);
+ }finally{await feed.stop()}
+});

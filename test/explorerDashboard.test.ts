@@ -62,7 +62,16 @@ test('C3D.2 dashboard renders mint-indexed verified multi-DEX discovery',()=>{
  ].filter(x=>x!=='poolRegistry.tokens'&&x!=='protocol_quote_adapter_not_yet_implemented')){
   assert.ok(explorerHtml.includes(item),'missing '+item);
  }
- assert.match(explorerHtml,/Meteora and PumpSwap quote adapters remain pending/);
- assert.match(explorerHtml,/LIVE · C3D.2/);
+ assert.match(explorerHtml,/Meteora DLMM quotes are active when fresh/);
+ assert.match(explorerHtml,/LIVE · C3D.4/);
  assert.match(explorerHtml,/var esc=function/,'all untrusted mints and venue strings must be escaped');
+});
+
+test('C3D.4 local DLMM and Orca readiness diagnostics surface in the radar',()=>{
+ for(const term of [
+  'Meteora DLMM local quote readiness','id="dlmmTable"',
+  'id="healthDlmm"','DLMM SDK ready / mapped',
+  'graph&&graph.dlmm','dlrows.map','Fresh local SDK quote state',
+  'LIVE · C3D.4'
+ ])assert.ok(explorerHtml.includes(term),'missing '+term);
 });

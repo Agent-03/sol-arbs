@@ -17,6 +17,9 @@ export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;po
  c3d2RegistryEnabled:boolean;c3d2RegistryTokensPerRefresh:number;
  c3d2RegistryConcurrency:number;c3d2RegistryMaxPools:number;
  c3d2RegistryTtlMs:number;c3d2RegistryMinLiquidityUsd:number;
+ c3d4DlmmEnabled:boolean;c3d4DlmmMaxPools:number;
+ c3d4DlmmConcurrency:number;c3d4DlmmRefreshMs:number;
+ c3d4DlmmMaxArraysPerSide:number;
  jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
@@ -130,6 +133,15 @@ export function loadConfig():Config{
   c3d2RegistryMaxPools:positiveInteger('C3D2_REGISTRY_MAX_POOLS',350),
   c3d2RegistryTtlMs:positiveInteger('C3D2_REGISTRY_TTL_MS',1200000),
   c3d2RegistryMinLiquidityUsd:nonNegativeNumber('C3D2_REGISTRY_MIN_LIQUIDITY_USD',2500),
+  c3d4DlmmEnabled:(()=>{
+   const v=process.env.C3D4_DLMM_ENABLED??'1';
+   if(v!=='0'&&v!=='1')throw Error('C3D4_DLMM_ENABLED must be 0 or 1');
+   return v==='1';
+  })(),
+  c3d4DlmmMaxPools:positiveInteger('C3D4_DLMM_MAX_POOLS',16),
+  c3d4DlmmConcurrency:positiveInteger('C3D4_DLMM_CONCURRENCY',3),
+  c3d4DlmmRefreshMs:positiveInteger('C3D4_DLMM_REFRESH_MS',8000),
+  c3d4DlmmMaxArraysPerSide:positiveInteger('C3D4_DLMM_MAX_ARRAYS_PER_SIDE',3),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};

@@ -2,6 +2,7 @@ import {PublicKey,type Connection,type AccountInfo} from '@solana/web3.js';
 import {decodeAmmV4AnyPair,decodeVault} from './ammV4.js';
 import {RAYDIUM_AMM_V4,RAYDIUM_CLMM} from './routes.js';
 import {C3Concentrated,type ConcentratedSnapshot} from './c3Concentrated.js';
+import {MeteoraDlmmMonitor,type DlmmHealth} from './meteoraDlmm.js';
 import {PoolInfoLayout} from '@raydium-io/raydium-sdk-v2';
 import {RAYDIUM_CPMM,SPL_TOKEN_PROGRAM,CPMM_VAULT_AUTHORITY,
  decodeCpmmPool,decodeCpmmConfig,cpmmEffectiveReserves} from './c3Cpmm.js';
@@ -29,13 +30,15 @@ export type GraphMonitorOptions={
  registryEnabled?:boolean;registryTokensPerRefresh?:number;
  registryConcurrency?:number;registryMaxPools?:number;
  registryTtlMs?:number;registryMinLiquidityUsd?:number;
+ dlmmEnabled?:boolean;dlmmMaxPools?:number;dlmmConcurrency?:number;
+ dlmmRefreshMs?:number;dlmmMaxArraysPerSide?:number;
 };
 export type GraphMonitorSnapshot=GraphEvaluation&{
  status:'disabled'|'discovering'|'warming'|'monitoring'|'partial_error'|'stopped';
  trackedPools:number;watchedAccounts:number;rpcReconciles:number;
  discoveryStats:{apiCandidates:number;validatedV4:number;validatedCpmm:number;selected:number};
  wsUpdates:number;localEvaluations:number;lastDiscoveryAt?:string;
- concentrated:ConcentratedSnapshot;tokenDiscovery:TokenDiscoveryHealth;
+ concentrated:ConcentratedSnapshot;dlmm:DlmmHealth;tokenDiscovery:TokenDiscoveryHealth;
  poolRegistry:Omit<PoolRegistrySnapshot,'pools'|'tokens'>;
  dynamicPoolDiscovery:{pairQueries:number;rotation:number;queryBudget:number;queryConcurrency:number};
  lastReconcileAt?:string;errors:string[];
@@ -100,6 +103,7 @@ export class C3GraphMonitor{
  private errors:string[]=[];
  private evaluation:GraphEvaluation;
  private readonly concentrated:C3Concentrated;
+ private readonly dlmm:MeteoraDlmmMonitor;
  private readonly tokenUniverse:C3TokenDiscovery;
  private readonly poolRegistry:C3PoolRegistry;
  private rotation=0;private lastPairQueries=0;
@@ -136,6 +140,15 @@ export class C3GraphMonitor{
    minLiquidityUsd:options.minLiquidityUsd,maxAgeMs:options.maxQuoteAgeMs,
    maxSlotSkew:options.maxSlotSkew,refreshMs:options.refreshMs
   },()=>this.scheduleEvaluation());
+  this.dlmm=new MeteoraDlmmMonitor(rpc,feed,{
+   enabled:!!options.dynamicDiscoveryEnabled&&!!options.dlmmEnabled,
+   maxPools:options.dlmmMaxPools??16,
+   maxAgeMs:options.maxQuoteAgeMs,maxSlotSkew:options.maxSlotSkew,
+   refreshMs:options.dlmmRefreshMs??8000,
+   concurrency:options.dlmmConcurrency??3,
+   minLiquidityUsd:options.minLiquidityUsd,
+   maxArraysPerSide:options.dlmmMaxArraysPerSide??3
+  },()=>this.scheduleEvaluation());
   if(!options.enabled)this.status='disabled';
  }
  poolRegistrySnapshot():PoolRegistrySnapshot{return this.poolRegistry.snapshot()}
@@ -143,8 +156,9 @@ export class C3GraphMonitor{
   const {pools:_registryPools,tokens:_registryTokens,...poolRegistry}=this.poolRegistry.snapshot();
   return {...this.evaluation,candidates:[...this.evaluation.candidates],
    status:this.status,trackedPools:this.nodes.size+this.concentrated.snapshot().health.trackedClmm+
-    this.concentrated.snapshot().health.trackedOrca,
+    this.concentrated.snapshot().health.trackedOrca+this.dlmm.snapshot().tracked,
    watchedAccounts:this.byAccount.size,concentrated:this.concentrated.snapshot().health,
+   dlmm:this.dlmm.snapshot(),
    tokenDiscovery:this.tokenUniverse.snapshot(),poolRegistry,
    dynamicPoolDiscovery:{pairQueries:this.lastPairQueries,rotation:this.rotation,
     queryBudget:this.options.poolRequestBudget??0,queryConcurrency:this.options.poolQueryConcurrency??1},
@@ -215,7 +229,10 @@ export class C3GraphMonitor{
   const pools=[...this.nodes.values()].map(p=>this.extract(p,at)).filter((p):p is GraphPool=>p!==null);
   const extra=this.concentrated.snapshot(at);
   pools.push(...extra.pools);
-  this.poolRegistry.observeReady(pools);
+  pools.push(...this.dlmm.graphPools(at));
+  const reasons=new Map(this.dlmm.snapshot(at).perPool.map(p=>[
+   p.address,p.reason??'awaiting_dlmm_local_quote_snapshot']));
+  this.poolRegistry.observeReady(pools,reasons);
   const scanned=evaluateGraphCycles(pools,{
    sizesUsd:this.options.sizesUsd,maxAgeMs:this.options.maxQuoteAgeMs,
    maxGapMs:this.options.maxQuoteGapMs,maxSlotSkew:this.options.maxSlotSkew,
@@ -227,7 +244,8 @@ export class C3GraphMonitor{
   },at);
   // Pools blocked by missing/stale components never reach evaluateGraphCycles.
   // Include them in coverage instead of misleadingly claiming zero stale pools.
-  const tracked=this.nodes.size+extra.health.trackedClmm+extra.health.trackedOrca;
+  const tracked=this.nodes.size+extra.health.trackedClmm+extra.health.trackedOrca+
+   this.dlmm.snapshot(at).tracked;
   this.evaluation={...scanned,poolCount:tracked,
    stalePools:scanned.stalePools+Math.max(0,tracked-pools.length)};
   this.localEvaluations++;
@@ -350,6 +368,7 @@ export class C3GraphMonitor{
    // Owner+mint-verified registry pools extend Raydium pair discovery.
    // Other venues are mapped separately, never injected into V4/CPMM math.
    const registry=this.poolRegistry.supported();
+   this.dlmm.setCandidates(registry.filter(x=>x.program==='meteora_dlmm'));
    const supplementary=new Map<string,Candidate[]>();
    for(const item of registry)if(item.venue==='raydium'){
     const a=assetOfMint(item.mintA),b=assetOfMint(item.mintB);
@@ -500,7 +519,7 @@ export class C3GraphMonitor{
  async start(){
   if(this.running||!this.options.enabled)return;
   this.running=true;
-  this.concentrated.start();
+  this.concentrated.start();this.dlmm.start();
   this.unsubscribe=this.feed.onUpdate(update=>{
    if(!this.running)return;
    const related=this.byAccount.get(update.address);
@@ -526,7 +545,7 @@ export class C3GraphMonitor{
   if(this.reconcileTimer)clearInterval(this.reconcileTimer);
   if(this.evaluationTimer)clearTimeout(this.evaluationTimer);
   this.unsubscribe?.();this.unsubscribe=undefined;
-  this.concentrated.stop();this.poolRegistry.stop();
+  this.concentrated.stop();this.dlmm.stop();this.poolRegistry.stop();
   for(const key of [...this.nodes.keys()])this.detach(key);
   this.status='stopped';
  }

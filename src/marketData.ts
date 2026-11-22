@@ -5,7 +5,7 @@ export type MarketSource='websocket'|'rpc_poll'|'rpc_reconcile'|'rpc_bootstrap'|
 export type MarketObservation={
  address:string; owner:string; data:Buffer; lamports:number; executable:boolean; rentEpoch?:number;
  slot:number; receivedAt:number;
- source:MarketSource; hash:string; verifiedAt:number;
+ source:MarketSource; hash:string; verifiedAt:number;verifiedSlot:number;
 };
 export type MarketUpdate=MarketObservation&{affectedPools:string[]};
 export type MarketHealth={
@@ -110,10 +110,11 @@ export class MarketDataFeed{
   const existing=this.accounts.get(address);
   if(existing){
    if(slot<existing.slot){this.olderSlotDrops++;return false;}
-   if(slot===existing.slot&&hash===existing.hash&&owner===existing.owner){
+   if(slot>=existing.slot&&hash===existing.hash&&owner===existing.owner){
     // A repeated RPC read may validate an old observation; it does not
     // turn that observation into a newer market update.
     existing.verifiedAt=receivedAt;
+    existing.verifiedSlot=Math.max(existing.verifiedSlot,slot);
     this.duplicateUpdates++;return false;
    }
    // Equal-slot RPC must not clobber a WebSocket/Geyser notification.
@@ -123,7 +124,8 @@ export class MarketDataFeed{
    }
   }
   const value:MarketObservation={address,owner,data,lamports:info.lamports,executable:info.executable,
-   rentEpoch:info.rentEpoch,slot,source,receivedAt,hash,verifiedAt:receivedAt};
+   rentEpoch:info.rentEpoch,slot,source,receivedAt,hash,
+   verifiedAt:receivedAt,verifiedSlot:slot};
   this.accounts.set(address,value);
   this.absent.delete(address);
   this.updates++;

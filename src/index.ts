@@ -43,6 +43,11 @@ async function main(){
   registryMaxPools:config.c3d2RegistryMaxPools,
   registryTtlMs:config.c3d2RegistryTtlMs,
   registryMinLiquidityUsd:config.c3d2RegistryMinLiquidityUsd,
+  dlmmEnabled:config.c3d4DlmmEnabled,
+  dlmmMaxPools:config.c3d4DlmmMaxPools,
+  dlmmConcurrency:config.c3d4DlmmConcurrency,
+  dlmmRefreshMs:config.c3d4DlmmRefreshMs,
+  dlmmMaxArraysPerSide:config.c3d4DlmmMaxArraysPerSide,
   maxPathChecks:config.c3GraphMaxPathChecks,maxResults:config.c3GraphMaxResults,
   minLiquidityUsd:config.c3dEnabled?config.c3dMinPoolLiquidityUsd:
    config.c3GraphMinLiquidityUsd,
@@ -114,7 +119,7 @@ async function main(){
     const raydium=engine.getRaydium().quotes;
     const clmm=engine.getClmm().quotes;
     send(200,{
-     mode:'READ_ONLY',observedAt:d.now,market:config.c3dEnabled?'dynamic wSOL/SPL':'SOL/USDC',phase:config.c3dEnabled?'C3D.2':d.phase,
+     mode:'READ_ONLY',observedAt:d.now,market:config.c3dEnabled?'dynamic wSOL/SPL':'SOL/USDC',phase:config.c3dEnabled?'C3D.4':d.phase,
      summary:{status:d.status,opportunities:d.opportunities,
       utility:d.discovery.utility,orca:d.orca,clmm:d.clmm,
       raydium:d.raydium,b5:d.b5,c1:d.c1,c2:d.c2,scan:d.scan,rpc:d.rpc,
