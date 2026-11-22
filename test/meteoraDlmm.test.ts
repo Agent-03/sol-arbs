@@ -159,7 +159,11 @@ test('C3D.4.1 concurrent per-pool batches refresh all DLMM slots without relaxin
   const bad=entries.get(poolAddresses[0]) as {
    lastVerifiedAt:number;retryAfter:number;refreshFailures:number
   };
-  bad.lastVerifiedAt=0;
+  // Simulate an account whose bytes are unchanged but whose last RPC
+  // verification is old. The scheduler must prioritize its actual cache age.
+  const sample=locations.get(poolAddresses[0])!;
+  feed.ingest(poolAddresses[0],{owner:sample.owner,data:sample.data,lamports:1,
+   executable:false,rentEpoch:0},8888,'rpc_poll',Date.now()-14000);
   await mon.refresh();
   snap=mon.snapshot();
   assert.equal(snap.refreshFailures,1);
