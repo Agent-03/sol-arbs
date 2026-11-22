@@ -260,6 +260,17 @@ export class MeteoraDlmmMonitor{
   return unique([entry.candidate.address,...this.arrays(entry),
    ...(entry.bitmap?[entry.bitmap]:[])]);
  }
+ private oldestVerifiedAt(entry:Entry):number{
+  const addresses=this.refreshAddresses(entry);
+  if(!addresses.length)return 0;
+  let oldest=Number.MAX_SAFE_INTEGER;
+  for(const address of addresses){
+   const observation=this.feed.get(address);
+   if(!observation)return 0;
+   oldest=Math.min(oldest,observation.verifiedAt);
+  }
+  return oldest===Number.MAX_SAFE_INTEGER?0:oldest;
+ }
  private isSolPair(entry:Entry):boolean{
   const sol=GRAPH_ASSETS.SOL.mint;
   return entry.candidate.mintA===sol||entry.candidate.mintB===sol;
@@ -289,6 +300,9 @@ export class MeteoraDlmmMonitor{
     }
    }
    const ready=this.state(entry);
+   // Missing or unverified components can survive an HTTP 200 response.
+   // Keep those pools eligible for recovery without monopolizing every tick.
+   if(!ready.ok)entry.retryAfter=Date.now()+Math.min(3500,this.effectiveRefreshMs);
    if(ready.ok&&(entry.lastReady===false||
      entry.lastReady===true&&!wasReady))this.recoveryCount++;
    entry.lastReady=ready.ok;
@@ -312,7 +326,7 @@ export class MeteoraDlmmMonitor{
    const at=Date.now();
    const plans=planDlmmRefresh([...this.entries.values()].map(entry=>({
     address:entry.candidate.address,
-    lastVerifiedAt:entry.lastVerifiedAt??0,
+    lastVerifiedAt:this.oldestVerifiedAt(entry),
     retryAfter:entry.retryAfter??0,
     ready:this.state(entry,at).ok,
     solPair:this.isSolPair(entry)
