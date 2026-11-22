@@ -1,6 +1,7 @@
 import {mkdir,open,appendFile,stat} from 'node:fs/promises';
-import {join} from 'node:path';
+import {dirname,join} from 'node:path';
 import {PublicKey,type Connection} from '@solana/web3.js';
+import {identifyProgram} from './routes.js';
 import {analyzeChainTransaction,summarizeChainEvidence,type ChainEvidence} from './c3ArbitrageEvidence.js';
 
 export type ChainSampleConfig={
@@ -45,10 +46,7 @@ export class ChainHistorySampler{
   this.journal=join(dir,'c3-onchain-evidence.jsonl');
  }
  async initialize(){
-  await mkdir(join(this.journal,'..'),{recursive:true}).catch(async()=>{
-   const dir=this.journal.slice(0,this.journal.lastIndexOf('/'));
-   await mkdir(dir,{recursive:true});
-  });
+  await mkdir(dirname(this.journal),{recursive:true});
   try{
    const size=(await stat(this.journal)).size;
    // Only read the most recent 5 MB from a long-lived journal.
@@ -147,4 +145,28 @@ export class ChainHistorySampler{
    }catch(error){this.counts.errors++;this.note('History tx '+signature+': '+String(error));}
   }
  }
+}
+
+/** Sample supported pool programs across venues before spending the history
+ * budget on multiple similar pools. Selection is deterministic.
+ */
+export function chooseEvidenceSeedPools(
+ pools:readonly {address:string;owner:string;liquidityUsd?:number}[],
+ limit:number
+):string[]{
+ if(!Number.isSafeInteger(limit)||limit<1)return [];
+ const eligible=pools.filter(p=>identifyProgram(p.owner)!=='unsupported')
+  .sort((a,b)=>(b.liquidityUsd??0)-(a.liquidityUsd??0));
+ const picked:string[]=[],seen=new Set<string>(),programs=new Set<string>();
+ for(const pool of eligible){
+  if(picked.length>=limit)break;
+  if(programs.has(pool.owner)||seen.has(pool.address))continue;
+  picked.push(pool.address);seen.add(pool.address);programs.add(pool.owner);
+ }
+ for(const pool of eligible){
+  if(picked.length>=limit)break;
+  if(seen.has(pool.address))continue;
+  picked.push(pool.address);seen.add(pool.address);
+ }
+ return picked;
 }
