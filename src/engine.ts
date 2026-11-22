@@ -143,6 +143,13 @@ export class MarketEngine {
    this.note('warning','discovery','Pool sources returned no validated pools; kept previous universe');
    return;
   }
+  const oldHasBoth=this.pools.some(p=>p.owner===RAYDIUM_AMM_V4)&&this.pools.some(p=>p.owner===ORCA_WHIRLPOOL);
+  const newHasBoth=result.pools.some(p=>p.owner===RAYDIUM_AMM_V4)&&result.pools.some(p=>p.owner===ORCA_WHIRLPOOL);
+  if(oldHasBoth&&!newHasBoth){
+   this.discoveryStatus='partial_error';
+   this.note('warning','discovery','Discovery missing a required DEX; retained the last working pool universe');
+   return;
+  }
   const previous=new Set(this.pools.map(p=>p.address));
   const next=new Set(result.pools.map(p=>p.address));
   this.discoveryAdded=[...next].filter(x=>!previous.has(x)).length;
@@ -185,7 +192,7 @@ export class MarketEngine {
    }else{
     this.note('info','scan',x.comparable+' comparable routes; none positive after assumed costs');
    }
-   const due=Date.now()-Date.parse(this.lastDiscoveryAt)>=this.discoveryInterval();
+   const due=Date.now()-Math.max(this.lastDiscoveryAttempt,Date.parse(this.lastDiscoveryAt))>=this.discoveryInterval();
    if(this.running&&due){
     try{await this.refreshUniverse(this.lastNetPositive?'scheduled':'no_fresh_profitable_routes');}
     catch(error){
@@ -219,7 +226,7 @@ export class MarketEngine {
     lastDurationMs:this.lastScanDurationMs,completedCycles:this.cycles,
     intervalMs:this.scanInterval(),nextAt:this.nextScanAt},
    discovery:{status:this.discoveryStatus,lastAt:this.lastDiscoveryAt,
-    nextAt:new Date(Date.parse(this.lastDiscoveryAt)+this.discoveryInterval()).toISOString(),
+    nextAt:new Date(Math.max(this.lastDiscoveryAttempt,Date.parse(this.lastDiscoveryAt))+this.discoveryInterval()).toISOString(),
     intervalMs:this.discoveryInterval(),reason:this.lastDiscoveryReason,
     validatedCandidates:this.discoveryValidated,trackedPools:this.pools.length,
     newlyAdded:this.discoveryAdded,removed:this.discoveryRemoved,
