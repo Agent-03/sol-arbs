@@ -3,7 +3,8 @@ import {Connection,PublicKey,type AccountInfo} from '@solana/web3.js';
 
 export type MarketSource='websocket'|'rpc_poll'|'rpc_reconcile'|'rpc_bootstrap'|'geyser';
 export type MarketObservation={
- address:string; owner:string; data:Buffer; slot:number; receivedAt:number;
+ address:string; owner:string; data:Buffer; lamports:number; executable:boolean; rentEpoch:number;
+ slot:number; receivedAt:number;
  source:MarketSource; hash:string; verifiedAt:number;
 };
 export type MarketUpdate=MarketObservation&{affectedPools:string[]};
@@ -50,6 +51,8 @@ export class MarketDataFeed{
   const previous=this.expectedOwners.get(address);
   if(previous&&previous!==owner)throw new Error('Conflicting owner for '+address);
   this.expectedOwners.set(address,owner);
+  const prior=this.accounts.get(address);
+  if(prior&&prior.owner!==owner){this.ownerMismatchDrops++;this.accounts.delete(address);}
  }
  setDependencies(pool:string,addresses:readonly string[]){
   this.clearDependencies(pool);
@@ -101,7 +104,8 @@ export class MarketDataFeed{
     this.olderSlotDrops++;return false;
    }
   }
-  const value:MarketObservation={address,owner,data,slot,source,receivedAt,hash,verifiedAt:receivedAt};
+  const value:MarketObservation={address,owner,data,lamports:info.lamports,executable:info.executable,
+   rentEpoch:info.rentEpoch,slot,source,receivedAt,hash,verifiedAt:receivedAt};
   this.accounts.set(address,value);
   this.updates++;
   if(source==='websocket')this.wsUpdates++;
