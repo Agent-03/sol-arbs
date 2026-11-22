@@ -6,6 +6,7 @@ import {Scanner} from './scanner.js';
 import {JupiterMonitor} from './jupiter.js';
 import {buildCandidates} from './routes.js';
 import {AmmV4Monitor} from './ammV4.js';
+import {OrcaMonitor} from './orca.js';
 async function main(){
  const config=loadConfig();
  const jupiter=new JupiterMonitor(config.jupiter);
@@ -18,11 +19,13 @@ async function main(){
  const routes=buildCandidates(discovered.pools);
  const ammV4=new AmmV4Monitor(validationConnection,discovered.pools,config.jupiter.sizesUsd);
  ammV4.start();
+ const orca=new OrcaMonitor(validationConnection,discovered.pools,config.jupiter.sizesUsd,()=>ammV4.snapshot().quotes,config.jupiter.assumedCostUsd);
+ orca.start();
  console.log(JSON.stringify({event:'discovery_complete',pools:discovered.pools.length,routeCandidates:routes.candidates.length,rejectedPools:routes.rejectedPools,warnings:discovered.warnings}));
  const scanner=new Scanner(config);
  const server=createServer((req,res)=>{
   const path=req.url?.split('?')[0];
-  if(!['/health','/pools','/discovery','/jupiter','/routes','/amm-v4'].includes(path??'')){
+  if(!['/health','/pools','/discovery','/jupiter','/routes','/amm-v4','/orca','/arb'].includes(path??'')){
    res.writeHead(404);res.end('Not found');return;
   }
   const snapshot=scanner.snapshot();
@@ -33,6 +36,13 @@ async function main(){
   }else if(path==='/discovery')res.end(JSON.stringify(discovered));
   else if(path==='/jupiter')res.end(JSON.stringify(jupiter.snapshot()));
   else if(path==='/amm-v4')res.end(JSON.stringify({...ammV4.snapshot(),note:'AMM v4 pool-level standalone indicative quotes only. No complete cross-DEX opportunity or executable transaction.'}));
+  else if(path==='/orca')res.end(JSON.stringify(orca.snapshot()));
+  else if(path==='/arb'){
+   const state=orca.snapshot();
+   res.end(JSON.stringify({status:state.status,updatedAt:state.lastUpdatedAt,indicativeRoutes:state.routeCandidates.length,executableRoutes:0,
+    candidates:state.routeCandidates.sort((a,b)=>b.indicativeNetUsd-a.indicativeNetUsd).slice(0,100),errors:state.errors,
+    warning:'Quote-only cross-venue estimates. Not executable; not atomic; fees/landing risk not verified.'}));
+  }
   else if(path==='/routes'){
    const state=new Map(snapshot.pools.map(p=>[p.address,p]));
    const candidates=routes.candidates.map(candidate=>{
@@ -52,7 +62,7 @@ async function main(){
   }else res.end(JSON.stringify(snapshot));
  });
  server.listen(config.port,'127.0.0.1',()=>console.log(`http://127.0.0.1:${config.port}/routes`));
- const stop=async()=>{jupiter.stop();ammV4.stop();server.close();await scanner.stop();};
+ const stop=async()=>{jupiter.stop();ammV4.stop();orca.stop();server.close();await scanner.stop();};
  process.once('SIGINT',()=>{void stop();});
  process.once('SIGTERM',()=>{void stop();});
  await scanner.start();
