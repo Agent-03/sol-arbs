@@ -71,7 +71,7 @@ export class AmmV4Monitor {
  private timer?:ReturnType<typeof setTimeout>;
  private active=false;private busy=false;
  private state:AmmV4Snapshot={status:'idle',quotes:[],errors:[],poolCount:0};
- constructor(private readonly conn:Connection,private readonly pools:DiscoveredPool[],private readonly sizesUsd:number[],private readonly intervalMs=15000){}
+ constructor(private readonly conn:Connection,private readonly pools:DiscoveredPool[],private readonly sizesUsd:number[],private readonly intervalMs=60000,private readonly maxSlotSkew=12){}
  snapshot():AmmV4Snapshot{return {...this.state,quotes:[...this.state.quotes],errors:[...this.state.errors]};}
  async scanOnce(){
   if(this.busy)return;
@@ -89,7 +89,7 @@ export class AmmV4Monitor {
      const state=decodeAmmV4(pool.address,info.data);
      const keys=[new PublicKey(state.baseVault),new PublicKey(state.quoteVault)];
      const vaults=await this.conn.getMultipleAccountsInfoAndContext(keys,{commitment:'confirmed',minContextSlot:snapshot.context.slot});
-     if(vaults.context.slot-snapshot.context.slot>2)throw new Error('Vault snapshot too far from pool slot');
+     if(vaults.context.slot-snapshot.context.slot>this.maxSlotSkew)throw new Error('Vault snapshot too far from pool slot for an indicative quote');
      const [a,b]=vaults.value;
      if(!a||!b||a.owner.toBase58()!==TOKEN_PROGRAM||b.owner.toBase58()!==TOKEN_PROGRAM)throw new Error('Unexpected token-vault program');
      const base=decodeVault(a.data,state.baseMint,AMM_AUTHORITY),quote=decodeVault(b.data,state.quoteMint,AMM_AUTHORITY);
