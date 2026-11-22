@@ -15,7 +15,8 @@ test('explorer retains the screenshot-inspired live table interactions',()=>{
   'id="query"','id="filter"','id="size"','id="csv"',
   'id="pagination"','data-sort','/api/explorer','/terminal',
   'id="c1watched"','id="c1updates"','id="c1ready"','/api/market-data','id="c2orca"','id="c2clmm"','id="c2checks"','id="validate"','/api/actions/validate',
-  'On-chain Evidence','data-tab="chain"','id="samplechain"','/api/actions/c3-analyze','/api/c3'
+  'On-chain Evidence','data-tab="chain"','id="samplechain"','/api/actions/c3-analyze','/api/c3',
+  'Multi-hop Radar','data-tab="graph"','id="graphTwo"','id="graphThree"','id="graphPositive"','/api/c3/graph'
  ];
  for(const term of expected)assert.ok(explorerHtml.includes(term),'missing '+term);
 });
@@ -24,4 +25,11 @@ test('explorer clearly distinguishes simulated quotes from real Solana transacti
  assert.match(explorerHtml,/No transaction indexer connected/i);
  assert.match(explorerHtml,/No Solana transaction signature/i);
  assert.match(explorerHtml,/No wallet/i);
+});
+
+test('C3B explorer labels multi-hop cycles as indicative and not executable',()=>{
+ assert.match(explorerHtml,/2-leg.*3-leg/i);
+ assert.ok(explorerHtml.includes('NOT same-slot atomic swaps'));
+ assert.ok(explorerHtml.includes('Estimated only · costs unverified'));
+ assert.ok(explorerHtml.includes('Not transaction-simulated'));
 });
