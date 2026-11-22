@@ -16,7 +16,7 @@ import type {MarketDataFeed,MarketObservation} from './marketData.js';
 
 export type DlmmPoolReadiness={
  address:string;pair:string;status:'ready'|'warming'|'not_ready';
- reason?:string;binArrays:number;oldestAgeMs:number|null;
+ reason?:string;quoteFailure?:string;binArrays:number;oldestAgeMs:number|null;
  slotGap:number|null;lastQuoteAt?:string;
 };
 export type DlmmHealth={
@@ -27,8 +27,9 @@ export type DlmmHealth={
 };
 type Candidate={address:string;mintA:string;mintB:string;liquidityUsd:number};
 type Entry={
- candidate:Candidate;sdk:DLMM;binX:string[];binY:string[];
- releases:Map<string,()=>void>;lastQuoteAt?:string;quoteFailure?:string;
+ candidate:Candidate;sdk:DLMM;binX:string[];binY:string[];bitmap:string|null;
+ releases:Map<string,()=>void>;lastReindexAt:number;
+ lastQuoteAt?:string;quoteFailure?:string;
 };
 type Observed={data:Buffer;verifiedAt:number;verifiedSlot:number;owner:string};
 const ctxPrefix='c3dlmm:';
@@ -122,7 +123,9 @@ export class MeteoraDlmmMonitor{
   const binX=unique(x.map(a=>a.publicKey.toBase58()));
   const binY=unique(y.map(a=>a.publicKey.toBase58()));
   if(!binX.length||!binY.length)throw Error('bin_arrays_missing_direction');
-  const all=unique([entry.candidate.address,...binX,...binY]);
+  const bitmap=entry.sdk.binArrayBitmapExtension?.publicKey.toBase58()??null;
+  const all=unique([entry.candidate.address,...binX,...binY,
+   ...(bitmap?[bitmap]:[])]);
   for(const address of all){
    if(entry.releases.has(address))continue;
    this.feed.expectOwner(address,METEORA_DLMM);
@@ -132,8 +135,9 @@ export class MeteoraDlmmMonitor{
    release();entry.releases.delete(key);
   }
   this.feed.setDependencies(ctxPrefix+entry.candidate.address,all);
-  entry.binX=binX;entry.binY=binY;
+  entry.binX=binX;entry.binY=binY;entry.bitmap=bitmap;
   await this.feed.reconcile(all,'rpc_bootstrap');
+  entry.lastReindexAt=Date.now();
   this.verifiedAccountRefreshes++;
  }
  private async bootstrap(candidate:Candidate){
@@ -152,10 +156,12 @@ export class MeteoraDlmmMonitor{
    if(sdk.tokenX.owner.toBase58()!==tokenProgram||
       sdk.tokenY.owner.toBase58()!==tokenProgram)
     throw Error('token_extension_quote_not_enabled');
-   entry={candidate,sdk,binX:[],binY:[],releases:new Map()};
+   entry={candidate,sdk,binX:[],binY:[],bitmap:null,
+    releases:new Map(),lastReindexAt:0};
    await this.updateArrays(entry);
    if(!this.running){entry.releases.forEach(release=>release());return}
    this.entries.set(candidate.address,entry);
+   this.errors=this.errors.filter(x=>!x.startsWith(candidate.address+':'));
    this.onChange();
   }catch(error){
    entry?.releases.forEach(release=>release());
@@ -174,8 +180,17 @@ export class MeteoraDlmmMonitor{
    await Promise.all(Array.from({length:Math.min(this.opts.concurrency,queued.length)},
     async()=>{while(cursor<queued.length&&this.running)await this.bootstrap(queued[cursor++])}));
    if(!this.running)return;
+   // Pool prices can move outside the originally selected bin-array window.
+   // Rotate a bounded number of array windows per refresh instead of
+   // freezing cached liquidity paths at their first observed active bin.
+   const due=[...this.entries.values()].filter(e=>
+    Date.now()-e.lastReindexAt>30000).slice(0,2);
+   await Promise.all(due.map(async e=>{
+    try{await this.updateArrays(e)}
+    catch(error){e.quoteFailure='bin_array_reindex: '+message(error)}
+   }));
    const all=unique([...this.entries.values()].flatMap(x=>
-    [x.candidate.address,...this.arrays(x)]));
+    [x.candidate.address,...this.arrays(x),...(x.bitmap?[x.bitmap]:[])]));
    if(all.length){
     await this.feed.reconcile(all,'rpc_reconcile');
     this.verifiedAccountRefreshes++;
@@ -191,7 +206,8 @@ export class MeteoraDlmmMonitor{
   ok:boolean;reason?:string;observedAt?:number;poolSlot?:number;tickSlot?:number;
   slotGap?:number;oldestAgeMs?:number
  }{
-  const addresses=[entry.candidate.address,...this.arrays(entry)];
+  const addresses=[entry.candidate.address,...this.arrays(entry),
+   ...(entry.bitmap?[entry.bitmap]:[])];
   if(entry.binX.length===0||entry.binY.length===0)
    return {ok:false,reason:'bin_arrays_not_prepared'};
   const observations:Observed[]=[];
@@ -214,6 +230,11 @@ export class MeteoraDlmmMonitor{
    if(acc.tokenXMint.toBase58()!==sdk.tokenX.publicKey.toBase58()||
       acc.tokenYMint.toBase58()!==sdk.tokenY.publicKey.toBase58())
     return {ok:false,reason:'pool_mints_changed'};
+   if(entry.bitmap){
+    const obs=this.observed(entry.bitmap);
+    if(!obs)return {ok:false,reason:'bitmap_extension_missing'};
+    sdk.program.coder.accounts.decode('binArrayBitmapExtension',obs.data);
+   }
    for(const address of this.arrays(entry)){
     const obs=this.observed(address);
     if(!obs)return {ok:false,reason:'bin_array_missing:'+address};
@@ -237,6 +258,12 @@ export class MeteoraDlmmMonitor{
    const pool=this.observed(address);
    if(!pool)return null;
    sdk.lbPair=sdk.program.coder.accounts.decode('lbPair',pool.data) as typeof sdk.lbPair;
+   if(entry.bitmap){
+    const bitmap=this.observed(entry.bitmap);
+    if(!bitmap||!sdk.binArrayBitmapExtension)return null;
+    sdk.binArrayBitmapExtension.account=sdk.program.coder.accounts.decode(
+     'binArrayBitmapExtension',bitmap.data) as typeof sdk.binArrayBitmapExtension.account;
+   }
    const names=fromX?entry.binX:entry.binY;
    const bins=names.map(key=>{
     const data=this.observed(key);
@@ -289,7 +316,8 @@ export class MeteoraDlmmMonitor{
     'bootstrapping_bin_arrays':'pool_not_prepared'};
    return {address:c.address,pair:assetOfMint(c.mintA)+'/'+assetOfMint(c.mintB),
     status:(value.ok?'ready':this.pending.has(c.address)?'warming':'not_ready') as DlmmPoolReadiness['status'],
-    reason:value.ok?undefined:value.reason,binArrays:entry?this.arrays(entry).length:0,
+    reason:value.ok?undefined:value.reason,quoteFailure:entry?.quoteFailure,
+    binArrays:entry?this.arrays(entry).length:0,
     oldestAgeMs:'oldestAgeMs' in value?value.oldestAgeMs??null:null,
     slotGap:'slotGap' in value?value.slotGap??null:null,
     lastQuoteAt:entry?.lastQuoteAt};
