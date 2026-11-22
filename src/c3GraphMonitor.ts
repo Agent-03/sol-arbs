@@ -2,6 +2,7 @@ import {PublicKey,type Connection,type AccountInfo} from '@solana/web3.js';
 import {decodeAmmV4AnyPair,decodeVault} from './ammV4.js';
 import {RAYDIUM_AMM_V4,RAYDIUM_CLMM} from './routes.js';
 import {C3Concentrated,type ConcentratedSnapshot} from './c3Concentrated.js';
+import {PoolInfoLayout} from '@raydium-io/raydium-sdk-v2';
 import {RAYDIUM_CPMM,SPL_TOKEN_PROGRAM,CPMM_VAULT_AUTHORITY,
  decodeCpmmPool,decodeCpmmConfig,cpmmEffectiveReserves} from './c3Cpmm.js';
 import {GRAPH_ASSETS,assetOfMint,evaluateGraphCycles,
@@ -282,8 +283,8 @@ export class C3GraphMonitor{
       const mints=owner===RAYDIUM_CPMM
        ?(()=>{const s=decodeCpmmPool(info.data);return [s.mintA,s.mintB] as const})()
        :owner===RAYDIUM_CLMM
-       ?(()=>{const o=info.data;return [new PublicKey(o.subarray(73,105)).toBase58(),
-           new PublicKey(o.subarray(105,137)).toBase58()] as const})()
+       ?(()=>{const state=PoolInfoLayout.decode(info.data);
+          return [state.mintA.toBase58(),state.mintB.toBase58()] as const})()
        :(()=>{const s=decodeAmmV4AnyPair(candidate.address,info.data);
           return [s.baseMint,s.quoteMint] as const})();
       const onchainA=assetOfMint(mints[0]);
