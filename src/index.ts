@@ -11,6 +11,7 @@ import {explorerHtml} from './explorerDashboard.js';
 import {MarketDataFeed} from './marketData.js';
 import {RpcHttpLimiter} from './rpc.js';
 import {ChainHistorySampler,chooseEvidenceSeedPools} from './c3ChainHistory.js';
+import {C3GraphMonitor} from './c3GraphMonitor.js';
 
 async function main(){
  const config=loadConfig();
@@ -25,6 +26,18 @@ async function main(){
  config.pools=discovered.pools.map(p=>new PublicKey(p.address));
  const marketData=new MarketDataFeed(connection,config.freshness.maxAgeMs,config.freshness.maxSlotSkew);
  const scanner=new Scanner(config,connection,marketData);
+ const c3Graph=new C3GraphMonitor(connection,marketData,{
+  enabled:config.c3GraphEnabled,maxPools:config.c3GraphMaxPools,
+  perPair:config.c3GraphPerPair,refreshMs:config.c3GraphRefreshMs,
+  reconcileMs:config.c3GraphReconcileMs,sizesUsd:config.c3GraphSizesUsd,
+  maxPathChecks:config.c3GraphMaxPathChecks,maxResults:config.c3GraphMaxResults,
+  minLiquidityUsd:config.c3GraphMinLiquidityUsd,
+  maxQuoteAgeMs:config.freshness.maxAgeMs,
+  maxQuoteGapMs:config.freshness.maxGapMs,
+  maxSlotSkew:config.freshness.maxSlotSkew,
+  assumedCostUsd:config.jupiter.assumedCostUsd
+ });
+
  const engine=new MarketEngine(connection,config,scanner,rpcLimiter,jupiter,discovered,manualPools,marketData);
  // History research is intentionally opt-in and uses a separate, slower HTTP
  // lane, preferring the backup endpoint. Never block quote RPC for archaeology.
@@ -75,6 +88,7 @@ async function main(){
    if(path==='/api/dashboard'){send(200,dashboard());return;}
    if(path==='/api/c2'){send(200,{phase:'C2',readOnly:true,...dashboard().c2,executableRoutes:0});return;}
    if(path==='/api/c3'){send(200,history.snapshot());return;}
+   if(path==='/api/c3/graph'){send(200,c3Graph.snapshot());return;}
    if(path==='/api/market-data'){send(200,{phase:'C1',readOnly:true,...marketData.snapshot(),warning:'Account-state cache only; SDK tick arrays may be older or from unrelated RPC contexts.'});return;}
    if(path==='/api/explorer'){
     const d=dashboard();
@@ -87,10 +101,12 @@ async function main(){
      summary:{status:d.status,opportunities:d.opportunities,
       utility:d.discovery.utility,orca:d.orca,clmm:d.clmm,
       raydium:d.raydium,b5:d.b5,c1:d.c1,c2:d.c2,scan:d.scan,rpc:d.rpc,
+      c3Graph:{...c3Graph.snapshot(),candidates:undefined},
       c3:{running:history.snapshot().running,
        startedAt:history.snapshot().startedAt,finishedAt:history.snapshot().finishedAt,
        progress:history.snapshot().progress,summary:history.snapshot().summary}},
      chainEvidence:history.snapshot().observations.slice(0,40),
+     graphCycles:c3Graph.snapshot().candidates.slice(0,40),
      routes:candidates,quotes:{orca,raydium,clmm},
      pools:d.discovery.eligibility,events:d.activity,
      transactionIndexing:false,
@@ -167,10 +183,15 @@ async function main(){
   console.log('Market metrics http://127.0.0.1:'+config.port+'/api/dashboard');
  });
  jupiter.start();
- void engine.start().catch(error=>console.error('Engine start failed',error));
+ // Give C2 bootstrap priority; then discover multi-token C3 routes on the
+ // same shared WS feed. C3 graph recomputations never make HTTP quote calls.
+ void engine.start().then(()=>c3Graph.start()).catch(error=>{
+  console.error('Engine/C3 graph start failed',error);
+ });
  const stop=async()=>{
   jupiter.stop();
   server.close();
+  c3Graph.stop();
   await engine.stop();
   await marketData.stop();
  };
