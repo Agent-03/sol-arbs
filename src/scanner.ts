@@ -103,8 +103,8 @@ export class Scanner{
    if(!this.running||!this.config.pools.some(pool=>pool.toBase58()===update.address))return;
    const source=update.source==='websocket'||update.source==='geyser'?'websocket':'poll';
    void this.ingest(update.address,{
-    data:update.data,owner:new PublicKey(update.owner),lamports:0,
-    executable:false,rentEpoch:0
+    data:update.data,owner:new PublicKey(update.owner),lamports:update.lamports,
+    executable:update.executable,rentEpoch:update.rentEpoch
    },update.slot,source).catch(error=>{this.errors++;console.error('Market feed ingest failed',error);});
   });
   for(const pool of this.config.pools)await this.subscribe(pool);
