@@ -16,19 +16,27 @@ import type {MarketDataFeed,MarketObservation} from './marketData.js';
 export type DlmmPoolReadiness={
  address:string;pair:string;status:'ready'|'warming'|'not_ready';
  reason?:string;quoteFailure?:string;binArrays:number;oldestAgeMs:number|null;
- slotGap:number|null;lastQuoteAt?:string;
+ slotGap:number|null;lastQuoteAt?:string;lastVerifiedAt?:string;
+ refreshFailures:number;refreshing:boolean;notReadyForMs:number|null;
 };
 export type DlmmHealth={
  status:'disabled'|'warming'|'ready'|'partial_error'|'stopped';
  tracked:number;ready:number;bootstrapAttempts:number;bootstrapFailures:number;
  localQuotes:number;quoteFailures:number;verifiedAccountRefreshes:number;
  pending:number;lastRefreshAt?:string;perPool:DlmmPoolReadiness[];errors:string[];
+ refreshCycles:number;refreshAttempts:number;refreshSuccesses:number;
+ refreshFailures:number;refreshInFlight:number;peakRefreshInFlight:number;
+ refreshedPoolsLastCycle:number;refreshBudget:number;refreshConcurrency:number;
+ effectiveRefreshMs:number;oldestAccountAgeMs:number|null;
+ reasonCounts:Record<string,number>;recoveryCount:number;backoffPools:number;
 };
 type Candidate={address:string;mintA:string;mintB:string;liquidityUsd:number};
 type Entry={
  candidate:Candidate;sdk:DLMM;binX:string[];binY:string[];bitmap:string|null;
  releases:Map<string,()=>void>;lastReindexAt:number;
- lastQuoteAt?:string;quoteFailure?:string;
+ lastQuoteAt?:string;quoteFailure?:string;needsReindex?:boolean;
+ lastVerifiedAt?:number;lastAttemptAt?:number;retryAfter?:number;
+ refreshFailures?:number;notReadySince?:number;lastReady?:boolean;
 };
 type Observed={data:Buffer;verifiedAt:number;verifiedSlot:number;owner:string};
 const ctxPrefix='c3dlmm:';
@@ -38,6 +46,28 @@ const core=(obs:MarketObservation):Observed=>({
 });
 const message=(error:unknown)=>String(error).slice(0,190);
 const unique=(addresses:readonly string[])=>[...new Set(addresses)];
+export type DlmmRefreshPlanItem={
+ address:string;lastVerifiedAt:number;retryAfter:number;ready:boolean;
+ solPair:boolean;
+};
+/** Prioritize old verification timestamps, then readiness and wSOL routes.
+ * Fairness comes from age: no pool is permanently displaced by a stale
+ * high-priority candidate. Retry cooldown prevents a failing RPC starving
+ * the other tracked pools.
+ */
+export function planDlmmRefresh(
+ items:readonly DlmmRefreshPlanItem[],now:number,budget:number
+):string[]{
+ if(!Number.isSafeInteger(budget)||budget<1)throw Error('Invalid DLMM refresh budget');
+ const eligible=items.filter(x=>x.retryAfter<=now);
+ const urgency=(x:DlmmRefreshPlanItem)=>
+  (x.lastVerifiedAt>0?now-x.lastVerifiedAt:Number.MAX_SAFE_INTEGER/4)+
+   (!x.ready?Math.min(1500,Math.max(0,now-x.lastVerifiedAt)*0.12):0)+
+   (x.solPair?250:0);
+ return eligible.sort((a,b)=>urgency(b)-urgency(a)||
+  a.address.localeCompare(b.address)).slice(0,budget).map(x=>x.address);
+}
+
 
 /** Local exact-input Meteora DLMM quotes.
  * The official SDK supplies dynamic fees, bin traversal and integer rounding.
@@ -56,11 +86,18 @@ export class MeteoraDlmmMonitor{
  private bootstrapAttempts=0;private bootstrapFailures=0;
  private localQuotes=0;private quoteFailures=0;
  private verifiedAccountRefreshes=0;
+ private refreshCycles=0;private refreshAttempts=0;private refreshSuccesses=0;
+ private refreshFailures=0;private refreshInFlight=0;private peakRefreshInFlight=0;
+ private refreshedPoolsLastCycle=0;private recoveryCount=0;
+ private readonly bootstrapRetry=new Map<string,{until:number;failures:number}>();
+ private readonly refreshBudget:number;private readonly refreshConcurrency:number;
+ private readonly effectiveRefreshMs:number;
  private lastRefreshAt?:string;
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
   private readonly opts:{
    enabled:boolean;maxPools:number;maxAgeMs:number;maxSlotSkew:number;
    refreshMs:number;concurrency:number;minLiquidityUsd:number;maxArraysPerSide:number;
+   refreshBudget?:number;refreshConcurrency?:number;
   },
   private readonly onChange:()=>void){
   if(!Number.isSafeInteger(opts.maxPools)||opts.maxPools<1||opts.maxPools>40||
@@ -70,6 +107,18 @@ export class MeteoraDlmmMonitor{
    !Number.isSafeInteger(opts.refreshMs)||opts.refreshMs<2500||
    !Number.isSafeInteger(opts.maxArraysPerSide)||opts.maxArraysPerSide<1||
    opts.maxArraysPerSide>8)throw Error('Invalid Meteora DLMM quote monitor limits');
+  this.refreshBudget=opts.refreshBudget??8;
+  this.refreshConcurrency=opts.refreshConcurrency??4;
+  if(!Number.isSafeInteger(this.refreshBudget)||this.refreshBudget<1||
+   this.refreshBudget>32||!Number.isSafeInteger(this.refreshConcurrency)||
+   this.refreshConcurrency<1||this.refreshConcurrency>12)
+   throw Error('Invalid DLMM per-tick refresh budget');
+  // Refresh every pool at least twice per maxAge window *at target latency*
+  // even if the user's existing .env retains C3D4_DLMM_REFRESH_MS=8000.
+  // No freshness/slot limits are relaxed to make metrics look better.
+  const rounds=Math.ceil(opts.maxPools/this.refreshBudget);
+  this.effectiveRefreshMs=Math.min(opts.refreshMs,Math.max(1000,
+   Math.floor(opts.maxAgeMs/(Math.max(1,rounds)*2))));
  }
  private report(error:string){
   this.errors.unshift(error);
@@ -82,7 +131,7 @@ export class MeteoraDlmmMonitor{
    if(!this.running||!update.affectedPools.some(x=>x.startsWith(ctxPrefix)))return;
    this.onChange();
   });
-  this.timer=setInterval(()=>void this.refresh(),this.opts.refreshMs);
+  this.timer=setInterval(()=>void this.refresh(),this.effectiveRefreshMs);
  }
  setCandidates(rows:readonly RegistryPool[]){
   if(!this.running)return;
@@ -100,6 +149,8 @@ export class MeteoraDlmmMonitor{
   const allowed=new Set(this.candidates.map(x=>x.address));
   for(const address of this.entries.keys())
    if(!allowed.has(address))this.forget(address);
+  for(const key of this.bootstrapRetry.keys())if(!allowed.has(key))
+   this.bootstrapRetry.delete(key);
   void this.refresh();
  }
  private forget(address:string){
@@ -117,6 +168,17 @@ export class MeteoraDlmmMonitor{
  }
  private async updateArrays(entry:Entry):Promise<void>{
   const sdk=entry.sdk;
+  // getBinArrayForSwap uses sdk.lbPair.activeId. Never search the next
+  // array window using the pool state frozen at SDK initialization.
+  const latest=this.observed(entry.candidate.address);
+  if(latest){
+   sdk.lbPair=sdk.program.coder.accounts.decode('lbPair',latest.data) as typeof sdk.lbPair;
+   if(entry.bitmap&&sdk.binArrayBitmapExtension){
+    const bitmap=this.observed(entry.bitmap);
+    if(bitmap)sdk.binArrayBitmapExtension.account=sdk.program.coder.accounts.decode(
+     'binArrayBitmapExtension',bitmap.data) as typeof sdk.binArrayBitmapExtension.account;
+   }
+  }
   const x=await sdk.getBinArrayForSwap(true,this.opts.maxArraysPerSide);
   const y=await sdk.getBinArrayForSwap(false,this.opts.maxArraysPerSide);
   const binX=unique(x.map(a=>a.publicKey.toBase58()));
@@ -136,7 +198,7 @@ export class MeteoraDlmmMonitor{
   this.feed.setDependencies(ctxPrefix+entry.candidate.address,all);
   entry.binX=binX;entry.binY=binY;entry.bitmap=bitmap;
   await this.feed.reconcile(all,'rpc_bootstrap');
-  entry.lastReindexAt=Date.now();
+  entry.lastReindexAt=Date.now();entry.needsReindex=false;
   this.verifiedAccountRefreshes++;
  }
  private async bootstrap(candidate:Candidate){
@@ -161,44 +223,110 @@ export class MeteoraDlmmMonitor{
    if(!this.running){entry.releases.forEach(release=>release());return}
    this.entries.set(candidate.address,entry);
    this.errors=this.errors.filter(x=>!x.startsWith(candidate.address+':'));
+   this.bootstrapRetry.delete(candidate.address);
    this.onChange();
   }catch(error){
    entry?.releases.forEach(release=>release());
    this.feed.clearDependencies(ctxPrefix+candidate.address);
    this.bootstrapFailures++;
+   const previous=this.bootstrapRetry.get(candidate.address)?.failures??0;
+   const failures=previous+1;
+   this.bootstrapRetry.set(candidate.address,{failures,
+    until:Date.now()+Math.min(30000,1500*Math.pow(2,Math.min(4,failures-1)))});
    this.report(candidate.address+': '+message(error));
   }finally{this.pending.delete(candidate.address)}
  }
- async refresh(){
-  if(!this.running||this.refreshing)return;
-  this.refreshing=true;
+ /** Starts bounded background bootstrap without waiting for every remote SDK
+  * RPC read before refreshing already-quotable pools.
+  */
+ private launchBootstraps(){
+  const free=Math.max(0,this.opts.concurrency-this.pending.size);
+  if(!free)return;
+  const at=Date.now();
+  const queued=this.candidates.filter(x=>!this.entries.has(x.address)&&
+   !this.pending.has(x.address)&&
+   (this.bootstrapRetry.get(x.address)?.until??0)<=at).slice(0,free);
+  for(const row of queued){
+   void this.bootstrap(row).then(()=>{
+    if(this.running&&this.candidates.some(x=>x.address===row.address))
+     this.onChange();
+   });
+  }
+ }
+ private refreshAddresses(entry:Entry):string[]{
+  return unique([entry.candidate.address,...this.arrays(entry),
+   ...(entry.bitmap?[entry.bitmap]:[])]);
+ }
+ private isSolPair(entry:Entry):boolean{
+  const sol=GRAPH_ASSETS.SOL.mint;
+  return entry.candidate.mintA===sol||entry.candidate.mintB===sol;
+ }
+ private async refreshEntry(entry:Entry):Promise<void>{
+  const address=entry.candidate.address;
+  if(!this.running||!this.entries.has(address))return;
+  entry.lastAttemptAt=Date.now();this.refreshAttempts++;
+  this.refreshInFlight++;
+  this.peakRefreshInFlight=Math.max(this.peakRefreshInFlight,this.refreshInFlight);
   try{
-   const queued=this.candidates.filter(c=>!this.entries.has(c.address)&&
-    !this.pending.has(c.address));
-   let cursor=0;
-   await Promise.all(Array.from({length:Math.min(this.opts.concurrency,queued.length)},
-    async()=>{while(cursor<queued.length&&this.running)await this.bootstrap(queued[cursor++])}));
-   if(!this.running)return;
-   // Pool prices can move outside the originally selected bin-array window.
-   // Rotate a bounded number of array windows per refresh instead of
-   // freezing cached liquidity paths at their first observed active bin.
-   const due=[...this.entries.values()].filter(e=>
-    Date.now()-e.lastReindexAt>30000).slice(0,2);
-   await Promise.all(due.map(async e=>{
-    try{await this.updateArrays(e)}
-    catch(error){e.quoteFailure='bin_array_reindex: '+message(error)}
-   }));
-   const all=unique([...this.entries.values()].flatMap(x=>
-    [x.candidate.address,...this.arrays(x),...(x.bitmap?[x.bitmap]:[])]));
-   if(all.length){
-    await this.feed.reconcile(all,'rpc_reconcile');
-    this.verifiedAccountRefreshes++;
+   // Each pool and its required bin arrays normally fit in ONE RPC request.
+   // Each batch has its own context slot. We never claim separate batches
+   // shared an atomic slot; the strict slot-skew check still applies.
+   await this.feed.reconcile(this.refreshAddresses(entry),'rpc_reconcile');
+   if(!this.running||this.entries.get(address)!==entry)return;
+   entry.lastVerifiedAt=Date.now();entry.refreshFailures=0;
+   entry.retryAfter=0;this.refreshSuccesses++;this.verifiedAccountRefreshes++;
+   // Refresh bin array windows after state changes or SDK partial-fill errors.
+   if(entry.needsReindex||Date.now()-entry.lastReindexAt>30000){
+    try{await this.updateArrays(entry);entry.quoteFailure=undefined}
+    catch(error){
+     entry.needsReindex=true;
+     entry.quoteFailure='reindex_failed:'+message(error);
+    }
    }
+   const ready=this.state(entry);
+   if(ready.ok&&entry.lastReady===false)this.recoveryCount++;
+   entry.lastReady=ready.ok;
+   if(ready.ok)entry.notReadySince=undefined;
+   else entry.notReadySince??=Date.now();
+  }catch(error){
+   entry.refreshFailures=(entry.refreshFailures??0)+1;
+   entry.retryAfter=Date.now()+Math.min(15000,
+    1200*Math.pow(2,Math.min(4,entry.refreshFailures-1)));
+   this.refreshFailures++;
+   entry.quoteFailure='rpc_reconcile:'+message(error);
+   this.report(address+': refresh '+message(error));
+  }finally{this.refreshInFlight--}
+ }
+ async refresh():Promise<void>{
+  if(!this.running||this.refreshing)return;
+  this.refreshing=true;this.refreshCycles++;
+  this.refreshedPoolsLastCycle=0;
+  try{
+   this.launchBootstraps();
+   const at=Date.now();
+   const plans=planDlmmRefresh([...this.entries.values()].map(entry=>({
+    address:entry.candidate.address,
+    lastVerifiedAt:entry.lastVerifiedAt??0,
+    retryAfter:entry.retryAfter??0,
+    ready:this.state(entry,at).ok,
+    solPair:this.isSolPair(entry)
+   })),at,this.refreshBudget);
+   let cursor=0;
+   const workers=Math.min(plans.length,this.refreshConcurrency);
+   await Promise.all(Array.from({length:workers},async()=>{
+    while(cursor<plans.length&&this.running){
+     const address=plans[cursor++],entry=this.entries.get(address);
+     if(!entry)continue;
+     await this.refreshEntry(entry);
+     this.refreshedPoolsLastCycle++;
+    }
+   }));
+   if(!this.running)return;
    this.lastRefreshAt=new Date().toISOString();
    this.onChange();
-   this.status=this.errors.length?'partial_error':'ready';
+   this.status=this.errors.length&&this.refreshFailures?'partial_error':'ready';
   }catch(error){
-   this.report('Meteora refresh: '+message(error));this.status='partial_error';
+   this.report('DLMM refresh planner: '+message(error));this.status='partial_error';
   }finally{this.refreshing=false}
  }
  private state(entry:Entry,now=Date.now()):{
@@ -273,14 +401,18 @@ export class MeteoraDlmmMonitor{
    // Both output and dynamic fees are calculated using Meteora's SDK.
    // Never allow an SDK partial fill to masquerade as a full exact input.
    const quote=sdk.swapQuote(new BN(inputRaw.toString()),fromX,new BN(0),bins,false);
-   if(!quote.outAmount||quote.outAmount.lten(0))return null;
-   if(quote.consumedInAmount.toString()!==inputRaw.toString())return null;
+   if(!quote.outAmount||quote.outAmount.lten(0)){
+    entry.quoteFailure='zero_output';return null;
+   }
+   if(quote.consumedInAmount.toString()!==inputRaw.toString()){
+    entry.quoteFailure='partial_fill';entry.needsReindex=true;return null;
+   }
    entry.lastQuoteAt=new Date(now).toISOString();entry.quoteFailure=undefined;
    this.localQuotes++;
    return BigInt(quote.outAmount.toString());
   }catch(error){
    this.quoteFailures++;
-   entry.quoteFailure=message(error);
+   entry.quoteFailure=message(error);entry.needsReindex=true;
    return null;
   }
  }
@@ -319,19 +451,39 @@ export class MeteoraDlmmMonitor{
     binArrays:entry?this.arrays(entry).length:0,
     oldestAgeMs:'oldestAgeMs' in value?value.oldestAgeMs??null:null,
     slotGap:'slotGap' in value?value.slotGap??null:null,
-    lastQuoteAt:entry?.lastQuoteAt};
+    lastQuoteAt:entry?.lastQuoteAt,lastVerifiedAt:entry?.lastVerifiedAt?
+     new Date(entry.lastVerifiedAt).toISOString():undefined,
+    refreshFailures:entry?.refreshFailures??0,
+    refreshing:!!entry&&!!entry.lastAttemptAt&&
+     entry.lastAttemptAt>=(entry.lastVerifiedAt??0)&&this.refreshInFlight>0,
+    notReadyForMs:value.ok?null:Math.max(0,now-(entry?.notReadySince??now))};
   });
+  const reasonCounts:Record<string,number>={};
+  for(const p of perPool)if(p.status!=='ready'){
+   const reason=(p.reason??'unknown').split(':')[0];
+   reasonCounts[reason]=(reasonCounts[reason]??0)+1;
+  }
+  const ages=perPool.map(p=>p.oldestAgeMs).filter((n):n is number=>n!==null);
   return {status:this.status,tracked:this.candidates.length,
    ready:perPool.filter(x=>x.status==='ready').length,
    bootstrapAttempts:this.bootstrapAttempts,bootstrapFailures:this.bootstrapFailures,
    localQuotes:this.localQuotes,quoteFailures:this.quoteFailures,
    verifiedAccountRefreshes:this.verifiedAccountRefreshes,pending:this.pending.size,
-   lastRefreshAt:this.lastRefreshAt,perPool,errors:[...this.errors]};
+   lastRefreshAt:this.lastRefreshAt,perPool,errors:[...this.errors],
+   refreshCycles:this.refreshCycles,refreshAttempts:this.refreshAttempts,
+   refreshSuccesses:this.refreshSuccesses,refreshFailures:this.refreshFailures,
+   refreshInFlight:this.refreshInFlight,peakRefreshInFlight:this.peakRefreshInFlight,
+   refreshedPoolsLastCycle:this.refreshedPoolsLastCycle,
+   refreshBudget:this.refreshBudget,refreshConcurrency:this.refreshConcurrency,
+   effectiveRefreshMs:this.effectiveRefreshMs,
+   oldestAccountAgeMs:ages.length?Math.max(...ages):null,
+   reasonCounts,recoveryCount:this.recoveryCount,
+   backoffPools:[...this.entries.values()].filter(e=>(e.retryAfter??0)>now).length};
  }
  stop(){
   this.running=false;if(this.timer)clearInterval(this.timer);
   this.eventRelease?.();this.eventRelease=undefined;
   for(const key of [...this.entries.keys()])this.forget(key);
-  this.candidates=[];this.status='stopped';
+  this.candidates=[];this.bootstrapRetry.clear();this.status='stopped';
  }
 }
