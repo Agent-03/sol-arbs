@@ -313,3 +313,51 @@ npm.cmd run dev
 Then open `http://127.0.0.1:8787/` and inspect `GET /api/dashboard` or `GET /arb`. Check `b5.marketEvents`, `b5.localEvaluations`, `b5.latency.p95Ms`, `b5.raydiumReadyPools`, `orca.quotedLegs`, `opportunities.excludedByReason` and `rpc.primary.rateLimits`. `GET /amm-v4` reports the Raydium WebSocket cache and reconciling health.
 
 **Validation status:** B5 source, dashboard and fixture-based tests are committed. They still require the local TypeScript build, full unit suite, and live RPC/WebSocket run for verification. Do not enable real-money trading on this version.
+
+
+## Phase B5.1 — persistent quote view, CLMM SDK pricing, pool eligibility and usable-route coverage
+
+**Dashboard:** `http://127.0.0.1:8787/`. The **Usable market coverage** section makes the difference between 20 *discovered* pools and the small subset with actual time-valid swap quotes visible. Every pool is shown with its program, TVL, state, exclusion reason, pool age, tick-array age (when obtainable), and quote count.
+
+### Implemented
+
+- **Orca quote continuity:** a per-pool last-known quote book retains completed quote legs while the next scan starts. It reports `warming`, `refreshing`, `fresh` or `expired` as of the query time. When a fresh scan begins publishing for a given pool, old legs for that pool are replaced to prevent mixing completed refresh generations; unchanged pools retain their previously quoted state. Expired data remains observable but is never counted as a fresh comparable opportunity. Scan errors do not advance the successful quote timestamp.
+- **Raydium CLMM adapter:** The official `@raydium-io/raydium-sdk-v2` SDK loads CLMM state and tick-array/bitmap data, and `PoolUtils.computeAmountOut` generates tick-array-aware *indicative* exact-input quotes for SOL/USDC. This is not a pool spot-price extrapolation. The default limit is 3 high-liquidity CLMM pools refreshed every 45 seconds with a 60-second hard cache lifetime; the separate B4 15-second research freshness gate remains stricter.
+- **Both directions:** Orca USDC→SOL followed by CLMM SOL→USDC uses SDK quote math at the **actual** Orca output. CLMM USDC→SOL followed by Orca SOL→USDC requests the Orca SDK quote at exactly the CLMM output; if an exact-input quote does not exist it is skipped, not interpolated.
+- **Selective Orca polling:** On subscribed Whirlpool pool-state changes, a cooldown-protected refresh targets the changed pool. Periodic full refreshes still protect against missed changes. The Orca tick-array read-start timestamp is tracked separately from its pool-account observation. **Tick-array RPC slots are unknown**, explicitly reported as `null` / `tickArraysSlotVerified:false`.
+- **Pool eligibility:** `active`, `refreshing`, `expired`, `waiting`, `excluded`, `unsupported`, and `not_selected`, with reasons including low/unknown TVL, missing quote, liquidity constraints and CLMM pools outside the RPC budget.
+- **Coverage:** Count budgeted Raydium AMM V4+CLMM × Orca pairs × quote sizes × both directions as the *theoretical monitored comparisons*, then show completed and freshness-qualified estimates separately. The percentage is a **research coverage ratio**, not realized success rate or probability of winning.
+
+`GET /api/dashboard` exposes `clmm`, `discovery.eligibility`, `discovery.utility`, `orca.quoteState`, `orca.freshLegs`, and `orca.expiredLegs`. New `GET /clmm` returns CLMM monitor diagnostics. `GET /arb` includes the coverage and eligibility summaries.
+
+### Existing local .env (keep provider credentials private)
+
+```dotenv
+B5_1_CLMM_MAX_POOLS=3
+B5_1_CLMM_REFRESH_MS=45000
+B5_1_CLMM_MAX_CACHE_AGE_MS=60000
+```
+
+Adjust `B5_1_CLMM_MAX_POOLS` downward if your Solana RPC plan starts returning 429s again. Other B4/B5 settings still apply. CLMM and Orca SDK snapshots may involve different pool/tick-array RPC slots and **must never be treated as atomic**. Raydium AMM V4 CPMM still does not reconcile OpenBook open-order balances; reported execution costs are assumptions. Every route remains indicative, `executableRoutes:0`, and the engine never signs or sends transactions.
+
+### Run / inspect
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Then in a second terminal:
+
+```powershell
+$d = Invoke-RestMethod http://127.0.0.1:8787/api/dashboard
+$d.discovery.utility | Format-List
+$d.discovery.eligibility | Select-Object program,state,reason,liquidityUsd | Format-Table -AutoSize
+$d.clmm | Select-Object status,selectedPools,readyPools,quotes,errors | Format-List
+$d.orca | Select-Object status,quoteState,freshLegs,expiredLegs | Format-List
+```
+
+**Validation note:** Source, test fixtures and dashboard JavaScript have been updated. The complete dependency install, TypeScript build, unit suite and live mainnet feed must still be verified on the target Windows workstation. In particular, the Raydium SDK integration is new and may need follow-up compatibility fixes from your local build output. No performance or profitability claims are implied by compilation or connectivity.
