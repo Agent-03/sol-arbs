@@ -18,6 +18,7 @@ export function classifyPoolEligibility(
  clmm:ClmmHealth,
  minLiquidityUsd:number,
  maxClmmPools:number,
+ maxQuoteAgeMs:number,
  now=Date.now()
 ):PoolEligibility[]{
  const chosen=new Set(clmm.perPool.map(p=>p.pool));
@@ -46,6 +47,8 @@ export function classifyPoolEligibility(
    if(!q.length)return record('waiting','Awaiting verified pool and vault state');
    const at=q[0].observedAt;
    const ageMs=Math.max(0,now-Date.parse(at));
+   if(ageMs>maxQuoteAgeMs)return record('expired','AMM v4 observation outside comparison freshness window',false,
+    {quoteLegs:q.length,lastObservedAt:at,poolAgeMs:ageMs});
    return record('active','AMM v4 state available; OpenBook orders not reconciled',true,
     {quoteLegs:q.length,lastObservedAt:at,poolAgeMs:ageMs});
   }
@@ -57,7 +60,8 @@ export function classifyPoolEligibility(
    const meta={lastObservedAt:p.lastObservedAt,poolAgeMs:ageMs,tickAgeMs:ageMs,
     quoteLegs:clmm.quotes.filter(q=>q.pool===pool.address).length};
    if(p.status==='refreshing')return record('refreshing','Refreshing Raydium CLMM tick-array SDK snapshot',false,meta);
-   if(p.status==='expired')return record('expired','CLMM quote snapshot expired',false,meta);
+   if(p.status==='expired'||(ageMs!==undefined&&ageMs>maxQuoteAgeMs))
+    return record('expired','CLMM snapshot outside freshness window; tick arrays not same-slot',false,meta);
    return record('active','SDK CLMM quote available; tick-array slots not synchronized',true,meta);
   }
   if(program==='orca_whirlpool'){
@@ -73,7 +77,7 @@ export function classifyPoolEligibility(
     poolAgeMs:ageMs,tickAgeMs:latestTick?Math.max(0,now-latestTick):undefined};
    if(poolFresh?.refreshing)return record('refreshing','Refreshing Orca SDK data; previous quotes retained',false,meta);
    if(!legs.length)return record('waiting','Awaiting first valid Whirlpool/tick-array quote',false,meta);
-   if(ageMs!==undefined&&ageMs>15000)return record('expired','Last Whirlpool quote is older than the comparison threshold',false,meta);
+   if(ageMs!==undefined&&ageMs>maxQuoteAgeMs)return record('expired','Last Whirlpool quote is older than the comparison threshold',false,meta);
    return record('active','Whirlpool SDK quotes available; tick-array slot not verified',true,meta);
   }
   return record('unsupported','No quote adapter');
