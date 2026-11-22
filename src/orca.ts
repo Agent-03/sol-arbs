@@ -9,7 +9,7 @@ import {amountOutExactInput,type AmmV4Quote} from './ammV4.js';
 
 export type OrcaQuote={
  pool:string;direction:'USDC_TO_SOL'|'SOL_TO_USDC';inputRaw:string;outputRaw:string;
- feeRaw:string;observedAt:string;poolSlot:number|null;classification:'indicative_non_executable';
+ feeRaw:string;observedAt:string;computedAt?:string;poolSlot:number|null;classification:'indicative_non_executable';
 };
 export type ArbitrageCandidate={
  id:string;sizeUsd:number;buyVenue:'raydium'|'orca';sellVenue:'raydium'|'orca';
@@ -62,7 +62,8 @@ export class OrcaMonitor{
  }
  constructor(private readonly connection:Connection,private readonly pools:DiscoveredPool[],
    private readonly sizesUsd:number[],private readonly getRaydiumQuotes:()=>AmmV4Quote[],
-   private readonly assumedCostUsd:number,private readonly intervalMs=60000,private readonly minLiquidityUsd=0){
+   private readonly assumedCostUsd:number,private readonly intervalMs=60000,private readonly minLiquidityUsd=0,
+   private readonly onLeg?:()=>void){
   // Ephemeral, unused local signing identity required by legacy SDK provider.
   // This service NEVER signs or broadcasts transactions.
   const provider=new AnchorProvider(connection,new Wallet(Keypair.generate()),{commitment:'confirmed'});
@@ -70,18 +71,23 @@ export class OrcaMonitor{
   this.client=buildWhirlpoolClient(this.ctx);
  }
  snapshot():OrcaStatus{return {...this.state,quotedLegs:[...this.state.quotedLegs],routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};}
- private async preparePool(poolAddress:string):Promise<{pool:Whirlpool;poolSlot:number}>{
+ private publishLegs(legs:OrcaQuote[]){
+  this.state={...this.state,quotedLegs:[...legs]};
+  try{this.onLeg?.();}catch(error){this.addError(this.state.errors,'Orca quote progress callback',error);}
+ }
+ private async preparePool(poolAddress:string):Promise<{pool:Whirlpool;poolSlot:number;observedAt:string}>{
   const address=new PublicKey(poolAddress);
   const account=await this.connection.getAccountInfoAndContext(address,'confirmed');
+  const observedAt=new Date().toISOString();
   if(!account.value||account.value.owner.toBase58()!==ORCA_WHIRLPOOL)throw new Error('Invalid Whirlpool owner');
   // Only one fresh pool fetch per cycle. No per-size reloading of the same pool.
   const pool=await this.client.getPool(address,IGNORE_CACHE);
   const data=pool.getData();
   const a=data.tokenMintA.toBase58(),b=data.tokenMintB.toBase58();
   if(!((a===SOL_MINT&&b===USDC_MINT)||(a===USDC_MINT&&b===SOL_MINT)))throw new Error('Unexpected Whirlpool token mints');
-  return {pool,poolSlot:account.context.slot};
+  return {pool,poolSlot:account.context.slot,observedAt};
  }
- private async quote(poolAddress:string,pool:Whirlpool,poolSlot:number,direction:'USDC_TO_SOL'|'SOL_TO_USDC',inputRaw:bigint,refreshTicks:boolean):Promise<OrcaQuote>{
+ private async quote(poolAddress:string,pool:Whirlpool,poolSlot:number,poolObservedAt:string,direction:'USDC_TO_SOL'|'SOL_TO_USDC',inputRaw:bigint,refreshTicks:boolean):Promise<OrcaQuote>{
   if(inputRaw<=0n)throw new Error('Invalid quote amount');
   const inputMint=direction==='USDC_TO_SOL'?USDC_MINT:SOL_MINT;
   // Refresh tick arrays once per direction per cycle; subsequent size quotes use
@@ -90,7 +96,7 @@ export class OrcaMonitor{
    Percentage.fromFraction(0,10000),this.ctx.program.programId,this.client.getFetcher(),refreshTicks?IGNORE_CACHE:PREFER_CACHE);
   if(result.estimatedAmountOut.isNeg()||result.estimatedAmountOut.isZero())throw new Error('No output in Whirlpool quote');
   return {pool:poolAddress,direction,inputRaw:inputRaw.toString(),outputRaw:result.estimatedAmountOut.toString(),
-   feeRaw:result.estimatedFeeAmount.toString(),observedAt:new Date().toISOString(),
+   feeRaw:result.estimatedFeeAmount.toString(),observedAt:poolObservedAt,computedAt:new Date().toISOString(),
    poolSlot,classification:'indicative_non_executable'};
  }
  async scanOnce(){
@@ -101,7 +107,7 @@ export class OrcaMonitor{
   }
   this.busy=true;
   const orca=this.pools.filter(p=>(p.venue==='orca'||p.venue==='manual')&&p.owner===ORCA_WHIRLPOOL && (p.liquidityUsd===undefined||p.liquidityUsd>=this.minLiquidityUsd));
-  this.state={...this.state,status:'scanning',progress:{totalPools:orca.length,completedPools:0,quotesCompleted:0,routesEstimated:0}};
+  this.state={...this.state,status:'scanning',quotedLegs:[],routeCandidates:[],progress:{totalPools:orca.length,completedPools:0,quotesCompleted:0,routesEstimated:0}};
   const legs:OrcaQuote[]=[],candidates:ArbitrageCandidate[]=[],errors:string[]=[];
   try{
    const rayQuotes=this.getRaydiumQuotes();
@@ -112,7 +118,7 @@ export class OrcaMonitor{
    for(const pool of orca){
     if(this.rateLimitedUntil>Date.now())break;
     this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address}};
-    let prepared: {pool:Whirlpool;poolSlot:number};
+    let prepared: {pool:Whirlpool;poolSlot:number;observedAt:string};
     try{prepared=await this.preparePool(pool.address);}
     catch(e){this.addError(errors,`Orca pool ${pool.address}`,e);completed++;if(this.rateLimitedUntil>Date.now())break;continue;}
     let buyTicksRefreshed=false;
@@ -122,7 +128,7 @@ export class OrcaMonitor{
      this.state={...this.state,progress:{totalPools:orca.length,completedPools:completed,quotesCompleted:legs.length,routesEstimated:candidates.length,currentPool:pool.address,currentSizeUsd:size}};
      const amount=BigInt(Math.round(size*1e6));
      try{
-      const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;legs.push(buy);
+      const buy=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'USDC_TO_SOL',amount,!buyTicksRefreshed);buyTicksRefreshed=true;legs.push(buy);this.publishLegs(legs);
       // Buy Orca, sell Raydium using each known Raydium pool's USDC-side output reserve.
       for(const ray of bySize.get(size)??[]){
        try{
@@ -136,7 +142,7 @@ export class OrcaMonitor{
       // Buy Raydium, sell Orca at EXACT amount produced by first leg.
       for(const ray of bySize.get(size)??[]){
        try{
-        const sell=await this.quote(pool.address,prepared.pool,prepared.poolSlot,'SOL_TO_USDC',BigInt(ray.outputRaw),!sellTicksRefreshed);sellTicksRefreshed=true;legs.push(sell);
+        const sell=await this.quote(pool.address,prepared.pool,prepared.poolSlot,prepared.observedAt,'SOL_TO_USDC',BigInt(ray.outputRaw),!sellTicksRefreshed);sellTicksRefreshed=true;legs.push(sell);this.publishLegs(legs);
         candidates.push(this.annotateLiquidity(evaluateRoute(size,
          {pool:ray.pool,venue:'raydium',inputRaw:ray.inputRaw,outputRaw:ray.outputRaw,observedAt:ray.observedAt,slot:ray.vaultSlot},
          {pool:pool.address,venue:'orca',inputRaw:sell.inputRaw,outputRaw:sell.outputRaw,observedAt:sell.observedAt,slot:sell.poolSlot},
