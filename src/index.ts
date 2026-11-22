@@ -35,7 +35,7 @@ async function main(){
     const buy=state.get(candidate.buyPool),sell=state.get(candidate.sellPool);
     const rejectionReasons:string[]=[];
     if(!buy||!sell||buy.stale||sell.stale)rejectionReasons.push('stale_or_missing_pool_state');
-    if(buy&&sell&&Math.abs(buy.slot-sell.slot)>2)rejectionReasons.push('pool_slot_mismatch');
+    if(buy?.slot!==undefined&&sell?.slot!==undefined&&Math.abs(buy.slot-sell.slot)>2)rejectionReasons.push('pool_slot_mismatch');
     rejectionReasons.push('missing_exact_swap_quoters');
     return {...candidate,buySlot:buy?.slot??null,sellSlot:sell?.slot??null,
       rejectionReasons,executable:false,estimatedNetUsd:null};
