@@ -63,7 +63,7 @@ test('C3D.2 dashboard renders mint-indexed verified multi-DEX discovery',()=>{
   assert.ok(explorerHtml.includes(item),'missing '+item);
  }
  assert.match(explorerHtml,/Meteora DLMM quotes are active when fresh/);
- assert.match(explorerHtml,/LIVE · C3D.2/);
+ assert.match(explorerHtml,/LIVE · C3D.4/);
  assert.match(explorerHtml,/var esc=function/,'all untrusted mints and venue strings must be escaped');
 });
 
