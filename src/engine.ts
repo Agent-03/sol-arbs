@@ -243,6 +243,7 @@ export class MarketEngine {
   this.running=false;
   if(this.timer)clearTimeout(this.timer);
   this.unsubscribeScanner?.();this.unsubscribeScanner=undefined;
+  this.orca.stop();
   this.clmm.stop();
   await this.ray.stop();
   await this.scanner.stop();
