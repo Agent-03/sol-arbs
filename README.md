@@ -1160,3 +1160,97 @@ Warm-up involves multiple Solana account reads. A DLMM pool appears
 as quote-ready only after its actual SDK/bin-array snapshot passes
 all readiness checks. Incomplete pool state stays visible in the
 per-pool health report; it is not passed into the graph.
+
+
+## C3D.4.1 — High-speed DLMM snapshot readiness
+
+This update addresses field observations such as `DLMM ready: 1/16`,
+`component_age`, and a 15-second quote snapshot deadline while the
+dual RPC providers still have available concurrency.
+
+The existing wSOL graph and official Meteora DLMM SDK quote logic are
+unchanged. **Only the state acquisition, refresh priorities, recovery,
+and telemetry are upgraded:**
+
+- DLMM pool accounts, required bin arrays, and bitmap extension are
+  reverified **together per pool**, usually in one
+  `getMultipleAccountsInfoAndContext` request. A pool with more than 75
+  accounts would remain subject to strict inter-batch slot-skew
+  validation rather than falsely being reported as one atomic read.
+- Pool groups are fetched concurrently using the existing active-active
+  RPC HTTP limiter, so several pools can be refreshed at once without
+  serially waiting for a giant shared account list.
+- The selection queue prioritizes the **oldest real verified component**
+  for each pool. It also favors unavailable/important wSOL routes
+  where age is comparable, while ensuring every pool gets a fair turn.
+  Unsuccessful/partial reads do not receive credit for fresh data.
+- SDK bootstrap is bounded and nonblocking. It does not prevent
+  already-quotable pools from receiving regular RPC refreshes.
+  Failing pools get exponential cooldowns and are retried; success
+  clears the per-pool error. Pools removed from the active universe
+  cannot be reattached by in-flight bootstrap jobs.
+- The monitor automatically shortens its effective tick interval to
+  allow all configured pools to be revisited twice within the quote
+  maximum age under normal RPC latency. This **does not override**
+  the original max-age, slot-skew, owner/mint, or SDK bin validation
+  rules. The previous `C3D4_DLMM_REFRESH_MS=8000` setting remains an
+  upper bound even if it is still present in your `.env`.
+- When changing liquidity/price bins require a new window, the next
+  bin-array calculation starts from **fresh verified pool bytes**,
+  not the SDK's initialization snapshot.
+- `/api/c3/pools` now recomputes quote readiness from current cached
+  accounts on each request rather than reusing the last evaluation's
+  notion of readiness. It can differ briefly from earlier
+  `/api/c3/graph` observations because those are snapshots taken
+  at different times.
+
+### Starting settings
+
+```dotenv
+C3D41_DLMM_REFRESH_BUDGET=8
+C3D41_DLMM_REFRESH_CONCURRENCY=4
+# Existing options still apply:
+C3D4_DLMM_MAX_POOLS=16
+C3D4_DLMM_CONCURRENCY=3
+C3D4_DLMM_REFRESH_MS=8000
+C3D4_DLMM_MAX_ARRAYS_PER_SIDE=3
+RPC_DUAL_ACTIVE=1
+```
+
+The new limits bound refresh work independently of SDK bootstrap. Avoid
+raising them until both RPC providers show stable request latency and
+no meaningful increase in 429s.
+
+### Inspect the actual results
+
+```powershell
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+$d = $g.dlmm
+$d | Select-Object status,tracked,ready,effectiveRefreshMs,refreshBudget,
+  refreshConcurrency,refreshCycles,refreshSuccesses,refreshFailures,
+  peakRefreshInFlight,recoveryCount,backoffPools,oldestAccountAgeMs |
+  Format-List
+
+$d.reasonCounts | Format-List
+$d.perPool | Select-Object pair,status,reason,oldestAgeMs,slotGap,
+  refreshFailures,notReadyForMs,lastVerifiedAt |
+  Format-Table -AutoSize
+
+$p = Invoke-RestMethod http://127.0.0.1:8787/api/c3/pools
+$p | Select-Object crossDexPairs,potentialTwoLegPairs,readyTwoLegPairs |
+ Format-List
+
+$r = Invoke-RestMethod http://127.0.0.1:8787/rpc
+$r | Select-Object mode,primaryAssigned,secondaryAssigned,peakInFlight |
+ Format-List
+$r.primary | Select-Object calls,pending,rateLimits,transportErrors |
+ Format-List
+$r.secondary | Select-Object calls,pending,rateLimits,transportErrors |
+ Format-List
+```
+
+The dashboard's **Pool Coverage** tab now exposes refresh cadence,
+successful/attempted checks, recovery transitions, age, and per-pool
+readiness blockers. This update still does not execute transactions or
+guarantee positive cycles: it keeps verified quote sources available
+so changing price differences can be observed.
