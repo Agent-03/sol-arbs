@@ -21,17 +21,28 @@ const key=(b:Buffer,o:number)=>new PublicKey(b.subarray(o,o+32)).toBase58();
 const u64=(b:Buffer,o:number)=>b.readBigUInt64LE(o);
 const ceilDiv=(n:bigint,d:bigint)=>(n+d-1n)/d;
 
-export function decodeAmmV4(address:string,data:Buffer):AmmV4State {
+export function decodeAmmV4AnyPair(address:string,data:Buffer):AmmV4State {
  if(data.length!==752)throw new Error('AMM v4 account must be exactly 752 bytes');
  const status=u64(data,0);
  if(status!==6n)throw new Error(`AMM v4 swap status ${status} not enabled`);
  const feeNumerator=u64(data,176),feeDenominator=u64(data,184);
  if(feeDenominator===0n||feeNumerator>=feeDenominator)throw new Error('Invalid AMM v4 swap fees');
  const baseMint=key(data,400),quoteMint=key(data,432);
- if(!((baseMint===SOL_MINT&&quoteMint===USDC_MINT)||(baseMint===USDC_MINT&&quoteMint===SOL_MINT)))throw new Error('Pool does not contain the canonical SOL/USDC mints');
+
  return {address,baseVault:key(data,336),quoteVault:key(data,368),baseMint,quoteMint,
   baseNeedTakePnl:u64(data,192),quoteNeedTakePnl:u64(data,200),feeNumerator,feeDenominator,status};
 }
+/** Existing SOL/USDC adapter remains strict; C3 research validates its own
+ * explicit token allowlist separately before using generic AMM V4 decoding.
+ */
+export function decodeAmmV4(address:string,data:Buffer):AmmV4State {
+ const state=decodeAmmV4AnyPair(address,data);
+ if(!((state.baseMint===SOL_MINT&&state.quoteMint===USDC_MINT)||
+  (state.baseMint===USDC_MINT&&state.quoteMint===SOL_MINT)))
+  throw new Error('Pool does not contain the canonical SOL/USDC mints');
+ return state;
+}
+
 export function decodeVault(data:Buffer,expectedMint:string,expectedAuthority?:string):bigint {
  if(data.length!==TOKEN_ACCOUNT_LEN)throw new Error('Expected legacy SPL token account length 165');
  if(key(data,0)!==expectedMint)throw new Error('Token vault mint mismatch');
