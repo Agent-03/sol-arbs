@@ -7,11 +7,13 @@ import {JupiterMonitor} from './jupiter.js';
 import {buildCandidates} from './routes.js';
 import {AmmV4Monitor} from './ammV4.js';
 import {OrcaMonitor} from './orca.js';
+import {RpcHttpLimiter} from './rpc.js';
 async function main(){
  const config=loadConfig();
  const jupiter=new JupiterMonitor(config.jupiter);
  jupiter.start();
- const validationConnection=new Connection(config.rpcUrl,'confirmed');
+ const rpcLimiter=new RpcHttpLimiter(config.rpcLimit);
+ const validationConnection=new Connection(config.rpcUrl,{commitment:'confirmed',wsEndpoint:config.wsUrl,fetch:rpcLimiter.fetch,disableRetryOnRateLimit:true});
  const discovered=await discoverPools(validationConnection,config.pools,config.maxPools);
  for(const warning of discovered.warnings)console.warn('[discovery]',warning);
  if(!discovered.pools.length)console.warn('No validated pool accounts found: pool feed disabled; Jupiter quote monitor remains read-only.');
@@ -23,24 +25,25 @@ async function main(){
  const orca=new OrcaMonitor(validationConnection,discovered.pools,config.jupiter.sizesUsd,()=>ammV4.snapshot().quotes,config.jupiter.assumedCostUsd,config.orcaScanIntervalMs);
  orca.start();
  console.log(JSON.stringify({event:'discovery_complete',pools:discovered.pools.length,routeCandidates:routes.candidates.length,rejectedPools:routes.rejectedPools,warnings:discovered.warnings}));
- const scanner=new Scanner(config);
+ const scanner=new Scanner(config,validationConnection);
  const server=createServer((req,res)=>{
   const path=req.url?.split('?')[0];
-  if(!['/health','/pools','/discovery','/jupiter','/routes','/amm-v4','/orca','/arb'].includes(path??'')){
+  if(!['/health','/pools','/discovery','/jupiter','/routes','/amm-v4','/orca','/arb','/rpc'].includes(path??'')){
    res.writeHead(404);res.end('Not found');return;
   }
   const snapshot=scanner.snapshot();
   const status=path==='/health'&&snapshot.status!=='healthy'?503:200;
   res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});
   if(path==='/health'){
-   res.end(JSON.stringify({status:snapshot.status,lastPollAt:snapshot.lastPollAt,errors:snapshot.errors,trackedPools:snapshot.pools.length,stalePools:snapshot.pools.filter(p=>p.stale).length,jupiter:jupiter.snapshot().status,routeCandidates:routes.candidates.length,executableRoutes:0}));
+   res.end(JSON.stringify({status:snapshot.status,lastPollAt:snapshot.lastPollAt,errors:snapshot.errors,trackedPools:snapshot.pools.length,stalePools:snapshot.pools.filter(p=>p.stale).length,jupiter:jupiter.snapshot().status,routeCandidates:routes.candidates.length,executableRoutes:0,rpc:rpcLimiter.snapshot()}));
   }else if(path==='/discovery')res.end(JSON.stringify(discovered));
+  else if(path==='/rpc')res.end(JSON.stringify(rpcLimiter.snapshot()));
   else if(path==='/jupiter')res.end(JSON.stringify(jupiter.snapshot()));
   else if(path==='/amm-v4')res.end(JSON.stringify({...ammV4.snapshot(),note:'AMM v4 pool-level standalone indicative quotes only. No complete cross-DEX opportunity or executable transaction.'}));
   else if(path==='/orca')res.end(JSON.stringify({...orca.snapshot(),raydiumQuoteStatus:ammV4.snapshot().status,raydiumQuoteCount:ammV4.snapshot().quotes.length,raydiumErrors:ammV4.snapshot().errors}));
   else if(path==='/arb'){
    const state=orca.snapshot();
-   res.end(JSON.stringify({status:state.status,updatedAt:state.lastUpdatedAt,indicativeRoutes:state.routeCandidates.length,executableRoutes:0,raydiumQuoteStatus:ammV4.snapshot().status,raydiumQuoteCount:ammV4.snapshot().quotes.length,raydiumErrors:ammV4.snapshot().errors,
+   res.end(JSON.stringify({status:state.status,updatedAt:state.lastUpdatedAt,indicativeRoutes:state.routeCandidates.length,executableRoutes:0,raydiumQuoteStatus:ammV4.snapshot().status,raydiumQuoteCount:ammV4.snapshot().quotes.length,raydiumErrors:ammV4.snapshot().errors,rpc:rpcLimiter.snapshot(),
     candidates:state.routeCandidates.sort((a,b)=>b.indicativeNetUsd-a.indicativeNetUsd).slice(0,100),errors:state.errors,
     warning:'Quote-only cross-venue estimates. Not executable; not atomic; fees/landing risk not verified.'}));
   }
