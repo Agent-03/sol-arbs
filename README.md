@@ -169,3 +169,32 @@ AMM_V4_MAX_SLOT_SKEW=12
 A free or low-tier RPC plan may still reject reads after the limit is applied. If `/rpc` reports continuing rate limits, try `RPC_HTTP_MIN_SPACING_MS=2000` and reduce `MAX_DISCOVERED_POOLS`. **The limiter intentionally slows down the monitor: it is a diagnostic solution, not a high-frequency arbitrage execution architecture.**
 
 A GitHub Actions workflow now runs `npm install`, `npm run build` and `npm test` on pushes to `main` and pull requests, using Node 22. This is not a substitute for live mainnet testing against your RPC plan.
+
+
+## Dual Solana RPC providers: Helius primary + Alchemy / QuickNode secondary
+
+The mainnet account scanner, Raydium v4 adapter, and Orca Whirlpool SDK now use a **shared Solana Web3.js Connection** with an optional HTTP JSON-RPC provider failover transport. This is **standby failover**, not continuous load balancing or parallel cross-provider quoting.
+
+Configure local `.env` (never commit API keys):
+
+```dotenv
+SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+SOLANA_WS_URL=wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY
+SOLANA_BACKUP_RPC_URL=https://solana-mainnet.g.alchemy.com/v2/YOUR_NEW_ALCHEMY_KEY
+```
+
+You may instead configure a Solana **mainnet** HTTPS QuickNode RPC URL as `SOLANA_BACKUP_RPC_URL`. The backup is optional; leave the variable blank for primary-only operation. If an endpoint/key was posted in chat or elsewhere publicly, **rotate that provider key** first and only put its replacement in your local `.env`.
+
+How failover works:
+- Helius is tried first. A primary HTTP **429, 500, 502, 503 or 504**, or transport failure, makes the read attempt Alchemy/QuickNode instead.
+- **401/403** are **not** failed over: wrong API keys and authorization errors must be corrected explicitly.
+- A provider's 429 cooldown, HTTP attempt counts, and failures are tracked separately. The backup's own 429 response is **not** ignored.
+- Providers are not used for unlimited retries: one request is serialized through both paths, and both must honor their own quota. No transaction creation, signing, or submission is introduced.
+- HTTP provider selection does **not** fail over Helius WebSocket subscriptions. Account updates remain on `SOLANA_WS_URL`; use the health endpoint to watch for subscription issues.
+- Two RPC providers can have different confirmed slots and differing freshness. Our existing min-context-slot and validation checks remain in effect; **cross-provider quote timings are not atomically consistent**. Routes are still labeled indicative and non-executable.
+
+Diagnostic endpoint: `http://127.0.0.1:8787/rpc` now includes `mode`, `activeProvider`, `failovers`, `secondarySuccesses`, and separate `primary`/`secondary` rate-limit stats, without printing endpoint URLs or credentials.
+
+Run `npm.cmd install`, `npm.cmd run build`, `npm.cmd test`, and `npm.cmd run dev` after pulling the latest main branch. This code has **not** been confirmed with your live Alchemy credentials; check `/rpc` and `/arb` after startup. The new backup will not be enabled until you add `SOLANA_BACKUP_RPC_URL` to your existing `.env`.
+
+Official Alchemy Solana RPC documentation: https://www.alchemy.com/rpc/solana
