@@ -1,6 +1,6 @@
 import type {ArbitrageCandidate} from './orca.js';
 
-export type FreshnessRules={maxAgeMs:number;maxGapMs:number;maxSlotSkew:number};
+export type FreshnessRules={maxAgeMs:number;maxGapMs:number;maxSlotSkew:number;minLiquidityUsd?:number};
 export type AssessedRoute=ArbitrageCandidate&{
   freshness:'aligned'|'stale';
   eligibleForComparison:boolean;
@@ -45,6 +45,12 @@ export function assessRoutes(
   if(!Number.isFinite(a)||!Number.isFinite(b)||a>now+1000||b>now+1000)freshnessReasons.push('invalid_observation_time');
   if(quoteAgeMs>rules.maxAgeMs)freshnessReasons.push('quote_age_exceeded');
   if(!Number.isFinite(gap)||gap>rules.maxGapMs)freshnessReasons.push('quote_gap_exceeded');
+  if(rules.minLiquidityUsd && (
+   candidate.buyLiquidityUsd===undefined || candidate.sellLiquidityUsd===undefined
+  ))freshnessReasons.push('unknown_pool_liquidity');
+  else if(rules.minLiquidityUsd && (
+   candidate.buyLiquidityUsd! < rules.minLiquidityUsd || candidate.sellLiquidityUsd! < rules.minLiquidityUsd
+  ))freshnessReasons.push('insufficient_pool_liquidity');
   if(slotGap===null)freshnessReasons.push('missing_pool_slot');
   else if(slotGap>rules.maxSlotSkew)freshnessReasons.push('pool_slot_skew_exceeded');
   return {...candidate,quoteAgeMs,buyAgeMs,sellAgeMs,slotGap,
