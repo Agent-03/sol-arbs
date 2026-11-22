@@ -818,3 +818,118 @@ $m.pools | Where-Object { $_.pool -like 'c3c:*' } |
 An absent CLMM tick, config or bitmap account, mismatched owner, stale
 component or excessive slot gap keeps its pool **excluded**. Increasing the
 number of tracked pools cannot fix missing/invalid SDK tick snapshots.
+
+
+## C3D.1 — In-place dynamic SPL discovery, wSOL arbitrage and dual-active RPC
+
+The existing C3 multi-hop graph has been **upgraded in place** (no parallel
+C3D scanner). It dynamically discovers classic SPL-token mints, finds
+Raydium pools and Orca Whirlpools using those mints, and starts/ends its
+two- and three-hop research cycles in **wSOL**. The legacy C2 SOL/USDC
+comparison panel still exists for continuity; only the C3 graph has
+changed its asset universe and base currency.
+
+**Discovery pipeline:** Jupiter Tokens V2 `recent`, `toptrending/5m` and
+`toptraded/5m` (when a `JUPITER_API_KEY` is configured) plus public
+DexScreener token profiles, token boosts and SOL-pair activity. Each
+candidate is deduplicated by its **mint**, then the shared Solana RPC
+checks that it is an initialized, classic SPL mint and reads decimals
+from the mint account. Token-2022 tokens are currently excluded from
+dynamic discovery because the existing V4/CPMM path requires classic
+SPL token accounts. Token labels are *display metadata only*.
+
+**Pool discovery:** the C3 monitor retains the SOL/USDC/USDT bridge pairs
+and rotates a bounded set of `SOL / SPL` and `USDC / SPL` pair searches
+through Raydium. Pools are not trusted based on public metadata alone:
+account owner, binary layout and on-chain mint pair are validated before
+joining the graph. Existing Orca Whirlpool and Raydium CLMM quote
+adapters are updated with the live mint registry. Pools from earlier
+rotation windows can stay subscribed while they remain in the active
+token universe, up to configured limits.
+
+**Local evaluation:** a route always begins and ends at wSOL, using
+9-decimal raw lamports, forwarding each exact hop output into the next
+hop. The API reports `sizeSol`, `inputWsolRaw`,
+`outputWsolRaw`, `grossSol`, `indicativeNetSol` and `symbolPath`.
+The top-level `bestIndicativeNetSol` replaces the previous USDC
+metric for this engine. Both positive and negative observations remain
+visible. The optional `C3D_ASSUMED_COST_SOL` defaults to zero for
+raw opportunity discovery; this is NOT a net execution guarantee.
+The V4/CPMM depth gate still uses actual pool input reserves, while
+concentrated-liquidity SDK tick traversal decides whether a swap is
+quotable for a given input. We do not fabricate a SOL/USD valuation
+to pretend a CLMM has constant-product vault depth.
+
+**Active-active Solana HTTP RPC:** set **both**
+`SOLANA_RPC_URL` and `SOLANA_BACKUP_RPC_URL`, then
+`RPC_DUAL_ACTIVE=1`. The transport alternates new reads between
+providers, with independently configurable pacing, concurrent
+request slots, backoff, and failover. WebSocket subscriptions still
+use `SOLANA_WS_URL` on the original primary. Exact limits vary by
+provider tier: increase concurrency only while 429s, backlog and
+snapshot slot gaps stay acceptable.
+
+### Recommended starting settings
+
+```dotenv
+C3D_ENABLED=1
+C3D_MAX_TOKENS=50
+C3D_TOKEN_REFRESH_MS=60000
+C3D_POOL_REFRESH_MS=45000
+C3D_POOL_QUERY_BUDGET=80
+C3D_POOL_QUERY_CONCURRENCY=8
+C3D_MIN_POOL_LIQUIDITY_USD=5000
+C3D_SIZES_SOL=0.05,0.1,0.25,0.5,1,2
+C3D_ASSUMED_COST_SOL=0
+RPC_DUAL_ACTIVE=1
+RPC_HTTP_MIN_SPACING_MS=150
+RPC_HTTP_MAX_CONCURRENT=3
+RPC_SECONDARY_HTTP_MIN_SPACING_MS=150
+RPC_SECONDARY_HTTP_MAX_CONCURRENT=3
+```
+
+The above settings do not override values already present in your
+personal `.env`; update those entries explicitly. Setting
+`C3D_ENABLED=0` restores legacy fixed-asset USDC graph research
+without changing the C2 monitor.
+
+### Verify it locally
+
+```powershell
+git pull origin main
+npm.cmd install
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+In another PowerShell window:
+
+```powershell
+$t = Invoke-RestMethod http://127.0.0.1:8787/api/c3/tokens
+$t | Select-Object status,activeTokens,discovered,verifiedMints,refreshes,lastDurationMs | Format-List
+$t.sourceCounts
+$t.sourceErrors
+$t.tokens | Select-Object -First 20 symbol,mint,decimals,score,categories | Format-Table -AutoSize
+
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+$g | Select-Object baseAsset,trackedPools,eligiblePools,twoLegCycles,threeLegCycles,positiveIndicative,bestIndicativeNetSol | Format-List
+$g.dynamicPoolDiscovery | Format-List
+$g.candidates | Select-Object -First 20 legs,sizeSol,indicativeNetSol,
+  @{N='Route';E={$_.symbolPath -join ' -> '}},
+  @{N='DEX';E={$_.hops.program -join ' -> '}} | Format-Table -AutoSize
+
+$r = Invoke-RestMethod http://127.0.0.1:8787/rpc
+$r | Select-Object mode,inFlight,peakInFlight,primaryAssigned,secondaryAssigned,failovers | Format-List
+$r.primary | Format-List
+$r.secondary | Format-List
+```
+
+### Scope boundary
+
+C3D.1 is **dynamic token discovery and the upgraded existing graph**,
+not Meteora DLMM/DAMM, PumpSwap swap math or live transaction building.
+Those DEX adapters require a separate protocol implementation before
+their pools can be evaluated with correct local exact-input math.
+No wallet signing, bundle submission or autonomous execution is
+introduced by this update.

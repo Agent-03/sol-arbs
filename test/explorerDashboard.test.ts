@@ -27,9 +27,9 @@ test('explorer clearly distinguishes simulated quotes from real Solana transacti
  assert.match(explorerHtml,/No wallet/i);
 });
 
-test('C3B explorer labels multi-hop cycles as indicative and not executable',()=>{
+test('C3D explorer labels wSOL multi-hop cycles as indicative and not executable',()=>{
  assert.match(explorerHtml,/2-leg.*3-leg/i);
  assert.ok(explorerHtml.includes('NOT same-slot atomic swaps'));
- assert.ok(explorerHtml.includes('Estimated only · costs unverified'));
+ assert.ok(explorerHtml.includes('Indicative amount differential · no execution'));
  assert.ok(explorerHtml.includes('Not transaction-simulated'));
 });

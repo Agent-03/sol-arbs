@@ -5,7 +5,8 @@ import {C3Concentrated,type ConcentratedSnapshot} from './c3Concentrated.js';
 import {PoolInfoLayout} from '@raydium-io/raydium-sdk-v2';
 import {RAYDIUM_CPMM,SPL_TOKEN_PROGRAM,CPMM_VAULT_AUTHORITY,
  decodeCpmmPool,decodeCpmmConfig,cpmmEffectiveReserves} from './c3Cpmm.js';
-import {GRAPH_ASSETS,assetOfMint,evaluateGraphCycles,
+import {C3TokenDiscovery,type TokenDiscoveryHealth} from './c3TokenDiscovery.js';
+import {GRAPH_ASSETS,assetOfMint,replaceDynamicGraphAssets,evaluateGraphCycles,
  type GraphAsset,type GraphPool,type GraphEvaluation,type GraphScanLimits} from './c3Graph.js';
 import type {MarketDataFeed} from './marketData.js';
 
@@ -21,13 +22,17 @@ export type GraphMonitorOptions={
  sizesUsd:number[];maxPathChecks:number;maxResults:number;maxQuoteAgeMs:number;
  maxQuoteGapMs:number;maxSlotSkew:number;minLiquidityUsd:number;assumedCostUsd:number;
  maxPoolInputShareBps?:number;
+ dynamicDiscoveryEnabled?:boolean;maxTokens?:number;tokenRefreshMs?:number;
+ poolRequestBudget?:number;poolQueryConcurrency?:number;apiKey?:string;
+ sizesSol?:number[];assumedCostSol?:number;
 };
 export type GraphMonitorSnapshot=GraphEvaluation&{
  status:'disabled'|'discovering'|'warming'|'monitoring'|'partial_error'|'stopped';
  trackedPools:number;watchedAccounts:number;rpcReconciles:number;
  discoveryStats:{apiCandidates:number;validatedV4:number;validatedCpmm:number;selected:number};
  wsUpdates:number;localEvaluations:number;lastDiscoveryAt?:string;
- concentrated:ConcentratedSnapshot;
+ concentrated:ConcentratedSnapshot;tokenDiscovery:TokenDiscoveryHealth;
+ dynamicPoolDiscovery:{pairQueries:number;rotation:number;queryBudget:number;queryConcurrency:number};
  lastReconcileAt?:string;errors:string[];
 };
 const baseline=(options:GraphMonitorOptions):GraphEvaluation=>
@@ -35,12 +40,15 @@ const baseline=(options:GraphMonitorOptions):GraphEvaluation=>
   maxGapMs:options.maxQuoteGapMs,maxSlotSkew:options.maxSlotSkew,
   minLiquidityUsd:options.minLiquidityUsd,maxPathChecks:options.maxPathChecks,
   maxResults:options.maxResults,assumedCostUsd:options.assumedCostUsd,
-  maxPoolInputShareBps:options.maxPoolInputShareBps});
+  maxPoolInputShareBps:options.maxPoolInputShareBps,
+  baseAsset:options.dynamicDiscoveryEnabled?'SOL':'USDC',
+  sizesSol:options.sizesSol,assumedCostSol:options.assumedCostSol});
 
 export function parseRaydiumGraphPair(result:unknown,a:GraphAsset,b:GraphAsset):Candidate[]{
  if(!result||typeof result!=='object')return [];
  const v=result as {success?:boolean;data?:{data?:unknown}};
  if(v.success!==true||!Array.isArray(v.data?.data))return [];
+ if(!GRAPH_ASSETS[a]||!GRAPH_ASSETS[b])return [];
  const permitted=new Set([GRAPH_ASSETS[a].mint,GRAPH_ASSETS[b].mint]);
  const rows:Candidate[]=[];
  for(const raw of v.data.data){
@@ -87,16 +95,29 @@ export class C3GraphMonitor{
  private errors:string[]=[];
  private evaluation:GraphEvaluation;
  private readonly concentrated:C3Concentrated;
+ private readonly tokenUniverse:C3TokenDiscovery;
+ private rotation=0;private lastPairQueries=0;
+ private readonly clmmRegistry=new Map<string,{candidate:Candidate;lastSeen:number}>();
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
   private readonly options:GraphMonitorOptions){
-  if(!Number.isSafeInteger(options.maxPools)||options.maxPools<1||options.maxPools>40||
+  if(!Number.isSafeInteger(options.maxPools)||options.maxPools<1||options.maxPools>200||
    !Number.isSafeInteger(options.perPair)||options.perPair<1||options.perPair>10||
-   !Number.isSafeInteger(options.refreshMs)||options.refreshMs<60000||
+   !Number.isSafeInteger(options.refreshMs)||options.refreshMs<30000||
    !Number.isSafeInteger(options.reconcileMs)||options.reconcileMs<5000)
    throw new Error('Invalid C3 graph monitor configuration');
+  if(options.dynamicDiscoveryEnabled&&(
+   !Number.isSafeInteger(options.poolRequestBudget)||options.poolRequestBudget!<5||
+   options.poolRequestBudget!>200||
+   !Number.isSafeInteger(options.poolQueryConcurrency)||options.poolQueryConcurrency!<1||
+   options.poolQueryConcurrency!>20))
+   throw new Error('Invalid C3D query concurrency/budget');
+  this.tokenUniverse=new C3TokenDiscovery(rpc,{
+   enabled:!!options.dynamicDiscoveryEnabled,maxTokens:options.maxTokens??50,
+   refreshMs:options.tokenRefreshMs??60000,apiKey:options.apiKey
+  });
   this.evaluation=baseline(options);
   this.concentrated=new C3Concentrated(rpc,feed,{
-   maxPools:Math.min(12,options.maxPools),perPair:Math.min(3,options.perPair),
+   maxPools:Math.min(24,options.maxPools),perPair:Math.min(3,options.perPair),
    minLiquidityUsd:options.minLiquidityUsd,maxAgeMs:options.maxQuoteAgeMs,
    maxSlotSkew:options.maxSlotSkew,refreshMs:options.refreshMs
   },()=>this.scheduleEvaluation());
@@ -107,6 +128,9 @@ export class C3GraphMonitor{
    status:this.status,trackedPools:this.nodes.size+this.concentrated.snapshot().health.trackedClmm+
     this.concentrated.snapshot().health.trackedOrca,
    watchedAccounts:this.byAccount.size,concentrated:this.concentrated.snapshot().health,
+   tokenDiscovery:this.tokenUniverse.snapshot(),
+   dynamicPoolDiscovery:{pairQueries:this.lastPairQueries,rotation:this.rotation,
+    queryBudget:this.options.poolRequestBudget??0,queryConcurrency:this.options.poolQueryConcurrency??1},
    rpcReconciles:this.rpcReconciles,wsUpdates:this.wsUpdates,
    discoveryStats:{...this.discoveryStats},
    localEvaluations:this.localEvaluations,lastDiscoveryAt:this.lastDiscoveryAt,
@@ -179,7 +203,9 @@ export class C3GraphMonitor{
    maxGapMs:this.options.maxQuoteGapMs,maxSlotSkew:this.options.maxSlotSkew,
    minLiquidityUsd:this.options.minLiquidityUsd,maxPathChecks:this.options.maxPathChecks,
    maxResults:this.options.maxResults,assumedCostUsd:this.options.assumedCostUsd,
-    maxPoolInputShareBps:this.options.maxPoolInputShareBps
+   maxPoolInputShareBps:this.options.maxPoolInputShareBps,
+   baseAsset:this.options.dynamicDiscoveryEnabled?'SOL':'USDC',
+   sizesSol:this.options.sizesSol,assumedCostSol:this.options.assumedCostSol
   },at);
   // Pools blocked by missing/stale components never reach evaluateGraphCycles.
   // Include them in coverage instead of misleadingly claiming zero stale pools.
@@ -237,23 +263,61 @@ export class C3GraphMonitor{
  }
  private async discover(){
   if(!this.running||this.refreshing)return;
-  this.refreshing=true;
-  this.status='discovering';
+  this.refreshing=true;this.status='discovering';
   try{
-   const assets=Object.keys(GRAPH_ASSETS) as GraphAsset[];
-   const pairs:Array<[GraphAsset,GraphAsset]>=[];
-   for(let i=0;i<assets.length;i++)for(let j=i+1;j<assets.length;j++)
-    pairs.push([assets[i],assets[j]]);
-   const results=await Promise.allSettled(pairs.map(([a,b])=>fetchPair(a,b)));
+   const dynamic=!!this.options.dynamicDiscoveryEnabled;
+   let pairs:Array<[GraphAsset,GraphAsset]>=[];
+   if(dynamic){
+    await this.tokenUniverse.refresh();
+    if(!this.running)return;
+    const tokens=this.tokenUniverse.getTokens();
+    // The pinned bridge assets already have dedicated anchor-pair queries.
+    // Do not let USDC/USDT/JUP consume the rotating new-token query budget.
+    const dynamicTokens=tokens.filter(t=>t.mint!==GRAPH_ASSETS.USDC.mint&&
+     t.mint!==GRAPH_ASSETS.USDT.mint&&t.mint!==GRAPH_ASSETS.JUP.mint);
+    replaceDynamicGraphAssets(tokens);
+    this.concentrated.setAllowedMints(Object.values(GRAPH_ASSETS).map(x=>x.mint));
+    // SOL is always the route root. USDC and USDT are bridge assets.
+    const anchors:Array<[GraphAsset,GraphAsset]>=[
+     ['SOL','USDC'],['SOL','USDT'],['USDC','USDT'],['SOL','JUP'],['USDC','JUP']
+    ];
+    const budget=this.options.poolRequestBudget??80;
+    pairs.push(...anchors.slice(0,budget));
+    // Retain the highest-priority five tokens every refresh, and rotate the
+    // remainder. No top-token monopoly over the bounded API query budget.
+    const capacity=Math.max(0,Math.floor((budget-pairs.length)/2));
+    const priority=dynamicTokens.slice(0,Math.min(5,capacity));
+    const rotating=dynamicTokens.slice(priority.length);
+    const round=rotating.length?this.rotation%rotating.length:0;
+    const selected=[...priority];
+    for(let i=0;i<rotating.length&&selected.length<capacity;i++)
+     selected.push(rotating[(round+i)%rotating.length]);
+    this.rotation+=Math.max(1,capacity-priority.length);
+    for(const token of selected){
+     pairs.push(['SOL',token.mint],['USDC',token.mint]);
+    }
+   }else{
+    const assets=Object.keys(GRAPH_ASSETS) as GraphAsset[];
+    for(let i=0;i<assets.length;i++)for(let j=i+1;j<assets.length;j++)
+     pairs.push([assets[i],assets[j]]);
+   }
+   const results:Array<PromiseSettledResult<Candidate[]>>=new Array(pairs.length);
+   let cursor=0;
+   const workers=Math.min(pairs.length,this.options.poolQueryConcurrency??6);
+   await Promise.all(Array.from({length:workers},async()=>{
+    while(cursor<pairs.length){
+     const i=cursor++;
+     try{results[i]={status:'fulfilled',value:await fetchPair(...pairs[i])}}
+     catch(reason){results[i]={status:'rejected',reason}}
+    }
+   }));
+   this.lastPairQueries=pairs.length;
    if(!this.running)return;
    const buckets:Candidate[][]=[];
    results.forEach((result,i)=>{
-    if(result.status==='fulfilled'){
-     // Do not select the top 3 Raydium results yet: the public endpoint mixes
-     // AMM V4, CPMM and CLMM. Validate program ownership FIRST so a few
-     // high-liquidity CLMMs do not hide legitimate V4 pools.
+    if(result.status==='fulfilled')
      buckets.push(result.value.filter(x=>x.liquidityUsd>=this.options.minLiquidityUsd));
-    }else{
+    else{
      buckets.push([]);
      this.note('Raydium '+pairs[i].join('/')+' discovery: '+String(result.reason));
     }
@@ -262,8 +326,8 @@ export class C3GraphMonitor{
    for(const bucket of buckets)for(const candidate of bucket)
     if(!unique.has(candidate.address))unique.set(candidate.address,candidate);
    if(!unique.size){
-    this.note('No pool candidates passed the pair and liquidity filters');
-    this.status='partial_error';return;
+    this.note('No Raydium candidates in current rotating query window; retaining earlier watched pools');
+    this.status=this.nodes.size?'monitoring':'partial_error';return;
    }
    const entries=[...unique.values()];
    this.discoveryStats={apiCandidates:entries.length,validatedV4:0,validatedCpmm:0,selected:0};
@@ -275,7 +339,7 @@ export class C3GraphMonitor{
      block.map(p=>new PublicKey(p.address)),'confirmed');
     if(!this.running)return;
     response.value.forEach((info,i)=>{
-     if(!info)return;
+     if(!info||info.executable)return;
      const owner=info.owner.toBase58();
      if(owner!==RAYDIUM_AMM_V4&&owner!==RAYDIUM_CPMM&&owner!==RAYDIUM_CLMM)return;
      const candidate=block[i];
@@ -287,35 +351,42 @@ export class C3GraphMonitor{
           return [state.mintA.toBase58(),state.mintB.toBase58()] as const})()
        :(()=>{const s=decodeAmmV4AnyPair(candidate.address,info.data);
           return [s.baseMint,s.quoteMint] as const})();
-      const onchainA=assetOfMint(mints[0]);
-      const onchainB=assetOfMint(mints[1]);
-      if(!onchainA||!onchainB||
-       !(onchainA===candidate.tokenA&&onchainB===candidate.tokenB||
-         onchainB===candidate.tokenA&&onchainA===candidate.tokenB))return;
-      validated.set(candidate.address,{
-       candidate:{...candidate,tokenA:onchainA,tokenB:onchainB,
-        program:owner===RAYDIUM_CPMM?'raydium_cpmm':
-         owner===RAYDIUM_CLMM?'raydium_clmm':'raydium_amm_v4'},
-       info,slot:response.context.slot
-      });
-     }catch{/* unsupported, disabled or differently encoded pool */}
+      const a=assetOfMint(mints[0]),b=assetOfMint(mints[1]);
+      if(!a||!b||!(a===candidate.tokenA&&b===candidate.tokenB||
+                      b===candidate.tokenA&&a===candidate.tokenB))return;
+      validated.set(candidate.address,{candidate:{...candidate,tokenA:a,tokenB:b,
+       program:owner===RAYDIUM_CPMM?'raydium_cpmm':
+        owner===RAYDIUM_CLMM?'raydium_clmm':'raydium_amm_v4'},
+       info,slot:response.context.slot});
+     }catch{/* On-chain layout/program incompatibility excludes pool. */}
     });
    }
    this.discoveryStats.validatedV4=[...validated.values()]
-    .filter(v=>v.candidate.program==='raydium_amm_v4').length;
+    .filter(x=>x.candidate.program==='raydium_amm_v4').length;
    this.discoveryStats.validatedCpmm=[...validated.values()]
-    .filter(v=>v.candidate.program==='raydium_cpmm').length;
-   const clmmCandidates=[...validated.values()].filter(x=>x.candidate.program==='raydium_clmm')
-    .map(x=>({address:x.candidate.address,tokenA:x.candidate.tokenA,
-      tokenB:x.candidate.tokenB,liquidityUsd:x.candidate.liquidityUsd}));
-   // SDK CLMM bootstrap never blocks V4/CPMM subscription startup.
-   void this.concentrated.setRaydiumCandidates(clmmCandidates).catch(e=>
-    this.note('C3C CLMM: '+String(e)));
+    .filter(x=>x.candidate.program==='raydium_cpmm').length;
+   const active=new Set(Object.keys(GRAPH_ASSETS));
+   const clmmNew=[...validated.values()].filter(x=>x.candidate.program==='raydium_clmm');
+   if(dynamic){
+    for(const [addr,row] of this.clmmRegistry)
+     if(!active.has(row.candidate.tokenA)||!active.has(row.candidate.tokenB)||
+        Date.now()-row.lastSeen>10*60_000)this.clmmRegistry.delete(addr);
+   }else this.clmmRegistry.clear();
+   for(const item of clmmNew)
+    this.clmmRegistry.set(item.candidate.address,{candidate:item.candidate,lastSeen:Date.now()});
+   const clmmCandidates=[...this.clmmRegistry.values()]
+    .sort((a,b)=>b.candidate.liquidityUsd-a.candidate.liquidityUsd)
+    .slice(0,24).map(x=>({
+     address:x.candidate.address,tokenA:x.candidate.tokenA,
+     tokenB:x.candidate.tokenB,liquidityUsd:x.candidate.liquidityUsd
+    }));
+   void this.concentrated.setRaydiumCandidates(clmmCandidates)
+    .catch(error=>this.note('C3D CLMM bootstrap: '+String(error)));
    const perPair=buckets.map(bucket=>bucket.flatMap(x=>{
-    const result=validated.get(x.address);
-    return result&&result.candidate.program!=='raydium_clmm'?[result]:[];
+    const row=validated.get(x.address);
+    return row&&row.candidate.program!=='raydium_clmm'?[row]:[];
    }).slice(0,this.options.perPair));
-   const picked:Verified[]=[];const seen=new Set<string>();
+   const picked:Verified[]=[],seen=new Set<string>();
    for(let tier=0;tier<this.options.perPair;tier++){
     for(const bucket of perPair){
      if(picked.length>=this.options.maxPools)break;
@@ -327,26 +398,27 @@ export class C3GraphMonitor{
     if(picked.length>=this.options.maxPools)break;
    }
    this.discoveryStats.selected=picked.length;
-   if(!picked.length&&!clmmCandidates.length){
-    this.note('No supported AMM V4 or CPMM accounts among '+entries.length+
-     ' Raydium pair candidates; other protocols require separate adapters');
-    this.status='partial_error';return;
-   }
    const wanted=new Set<string>();
    for(const result of picked){
     if(!this.running)return;
     const {candidate,info,slot}=result;
     wanted.add(candidate.address);
-    if(this.nodes.has(candidate.address)){
+    if(this.nodes.has(candidate.address))
      this.nodes.get(candidate.address)!.candidate=candidate;
-    }else this.attach(candidate,info,slot,Date.now());
+    else this.attach(candidate,info,slot,Date.now());
    }
-   // Retain previous subscriptions when public discovery returns nothing.
+   // Rotation must never drop an otherwise valid pool simply because its
+   // token was not included in this cycle's bounded Raydium API window.
+   if(dynamic)for(const [id,node] of this.nodes){
+    if(wanted.size>=this.options.maxPools)break;
+    if(active.has(node.candidate.tokenA)&&active.has(node.candidate.tokenB))
+     wanted.add(id);
+   }
    for(const id of [...this.nodes.keys()])if(!wanted.has(id))this.detach(id);
    this.lastDiscoveryAt=new Date().toISOString();
    await this.reconcile();
    this.status=this.nodes.size||clmmCandidates.length?'monitoring':'partial_error';
-  }catch(error){this.note('C3B discovery: '+String(error));this.status='partial_error'}
+  }catch(error){this.note('C3D discovery: '+String(error));this.status='partial_error'}
   finally{this.refreshing=false;this.scheduleEvaluation()}
  }
  private async reconcile(){

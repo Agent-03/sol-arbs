@@ -1,157 +1,148 @@
 import {RpcHttpLimiter,type RpcLimitOptions,type RpcLimitSnapshot} from './rpc.js';
 
-/**
- * An optional standby endpoint for Solana HTTP JSON-RPC requests.
- * WebSocket subscriptions remain on the primary Connection's WS endpoint.
- * No signing, transaction submission, or user secrets are stored here.
+/** Two independent HTTP Solana RPC lanes. WS notifications stay on primary;
+ * account monotonicity and bounded slot checks protect mixed RPC snapshots.
  */
-export type RpcFailoverSnapshot = {
- mode:'single'|'failover';
+export type RpcFailoverSnapshot={
+ mode:'single'|'failover'|'dual_active';
  activeProvider:'primary'|'secondary';
- failovers:number;
- secondarySuccesses:number;
- primaryFailures:number;
- secondaryFailures:number;
+ failovers:number;secondarySuccesses:number;
+ primaryFailures:number;secondaryFailures:number;
+ primaryAssigned:number;secondaryAssigned:number;
+ inFlight:number;peakInFlight:number;
  lastFailoverAt?:string;
- primary:RpcLimitSnapshot;
- secondary?:RpcLimitSnapshot;
+ primary:RpcLimitSnapshot;secondary?:RpcLimitSnapshot;
 };
+type Provider='primary'|'secondary';
+const requestUrl=(input:Parameters<typeof fetch>[0]):string=>
+ typeof input==='string'?input:input instanceof URL?input.toString():input.url;
+const failedStatus=(n:number)=>n===429||n===500||n===502||n===503||n===504;
 
-function requestUrl(input:Parameters<typeof fetch>[0]):string {
- return typeof input==='string'?input:input instanceof URL?input.toString():input.url;
-}
-function isFailoverStatus(status:number):boolean {
- return status===429||status===500||status===502||status===503||status===504;
-}
-
-/**
- * Keeps the upstream RPC client on a single Connection and redirects only
- * its HTTP transport requests. Calls are serialized (across both providers)
- * and a 429 cooldown on one provider does not freeze the other provider.
- *
- * HTTP 401/403, application JSON-RPC errors and successful HTTP 200
- * responses are NOT automatically failed over.
+/** `dualActive` distributes HTTP reads over both RPC providers instead
+ * of serializing them through a global request lock. Each provider has its
+ * own concurrency cap, pacing and 429 cooldown. Failover is independent
+ * of the active-active scheduler. No credentials are forwarded to another host.
  */
-export class RpcProviderPool {
+export class RpcProviderPool{
  private readonly primary:RpcHttpLimiter;
  private readonly secondary?:RpcHttpLimiter;
- private serial:Promise<void>=Promise.resolve();
- private primaryFailedUntil=0;
- private secondaryFailedUntil=0;
- private failovers=0;
- private secondarySuccesses=0;
- private primaryFailures=0;
- private secondaryFailures=0;
- private activeProvider:'primary'|'secondary'='primary';
+ private readonly dualActive:boolean;
+ private primaryFailedUntil=0;private secondaryFailedUntil=0;
+ private failovers=0;private secondarySuccesses=0;
+ private primaryFailures=0;private secondaryFailures=0;
+ private primaryAssigned=0;private secondaryAssigned=0;
+ private inFlight=0;private peakInFlight=0;
+ private roundRobin=0;
+ private activeProvider:Provider='primary';
  private lastFailoverAt?:string;
-
+ private readonly failedForMs=10000;
  constructor(
   private readonly primaryUrl:string,
   private readonly secondaryUrl:string|undefined,
   options:RpcLimitOptions,
-  transport:typeof fetch=globalThis.fetch
+  transport:typeof fetch=globalThis.fetch,
+  settings:{dualActive?:boolean;secondaryOptions?:RpcLimitOptions}={}
  ){
-  const validate=(value:string)=>{const url=new URL(value);if(url.protocol!=='https:')throw new Error('Solana RPC URLs must be HTTPS');return url.toString();};
-  const primary=validate(primaryUrl);
-  if(secondaryUrl && validate(secondaryUrl)===primary)throw new Error('Secondary Solana RPC must differ from the primary');
+  const check=(url:string)=>{const u=new URL(url);
+   if(u.protocol!=='https:')throw new Error('Solana RPC URLs must be HTTPS');
+   return u.toString();
+  };
+  if(secondaryUrl&&check(secondaryUrl)===check(primaryUrl))
+   throw new Error('Secondary Solana RPC must differ from primary');
+  check(primaryUrl);
   this.primary=new RpcHttpLimiter(secondaryUrl?{...options,maxRetries:0}:options,transport);
-  this.secondary=secondaryUrl?new RpcHttpLimiter({...options,maxRetries:0},transport):undefined;
+  this.secondary=secondaryUrl?new RpcHttpLimiter({
+   ...(settings.secondaryOptions??options),maxRetries:0
+  },transport):undefined;
+  this.dualActive=!!this.secondary&&!!settings.dualActive;
  }
- private readonly failedForMs=10_000;
-
- private cooling(limiter:RpcHttpLimiter,unhealthyUntil:number):boolean {
-  const from429=limiter.snapshot().cooldownUntil;
-  return Math.max(unhealthyUntil,from429?Date.parse(from429):0)>Date.now();
+ private cooling(provider:Provider):boolean{
+  const limiter=provider==='primary'?this.primary:this.secondary;
+  if(!limiter)return true;
+  const cooldown=limiter.snapshot().cooldownUntil;
+  const unhealthy=provider==='primary'?this.primaryFailedUntil:this.secondaryFailedUntil;
+  return Math.max(unhealthy,cooldown?Date.parse(cooldown):0)>Date.now();
  }
- private inputForSecondary(input:Parameters<typeof fetch>[0]):Parameters<typeof fetch>[0]{
+ private secondaryRequest(input:Parameters<typeof fetch>[0],init?:RequestInit){
   if(!this.secondaryUrl)throw new Error('Secondary RPC unavailable');
-  // Solana web3.js supplies a URL string and init.body. Preserve method and
-  // request bytes while replacing ONLY the destination URL.
-  return typeof input==='string'||input instanceof URL
-   ?this.secondaryUrl
-   :new Request(this.secondaryUrl,input.clone());
- }
-
- private async doFetch(input:Parameters<typeof fetch>[0],init?:RequestInit):Promise<Response>{
-  if(!this.secondary){
-   return this.primary.fetch(input,init);
-  }
-  // Never forward non-RPC fetches or API-key-bearing URLs to a backup.
-  if(new URL(requestUrl(input)).toString()!==new URL(this.primaryUrl).toString()){
-   throw new Error('RPC request target differs from configured primary endpoint');
-  }
-  // Clone before the primary call in case the fetch input is a Request whose
-  // body would otherwise be consumed before failover.
-  const backupInput=this.inputForSecondary(input);
   const headers=new Headers(init?.headers??(input instanceof Request?input.headers:undefined));
-  // Credentials for the primary provider must not be sent to a different host.
-  headers.delete('authorization');
-  headers.delete('proxy-authorization');
-  headers.delete('x-api-key');
-  headers.delete('cookie');
-  const backupInit:RequestInit={...init,headers};
-  let primaryResponse:Response|undefined;
-  let primaryError:unknown;
-  if(!this.cooling(this.primary,this.primaryFailedUntil)){
-   try{
-    primaryResponse=await this.primary.fetch(input,init);
-    if(!isFailoverStatus(primaryResponse.status)){
-     this.activeProvider='primary';
-     return primaryResponse;
+  for(const name of ['authorization','proxy-authorization','x-api-key','cookie'])headers.delete(name);
+  const target:Parameters<typeof fetch>[0]=
+   input instanceof Request?new Request(this.secondaryUrl,input.clone()):this.secondaryUrl;
+  return {input:target,init:{...init,headers} as RequestInit};
+ }
+ private async attempt(provider:Provider,input:Parameters<typeof fetch>[0],init?:RequestInit){
+  const limiter=provider==='primary'?this.primary:this.secondary!;
+  if(provider==='primary')this.primaryAssigned++;else this.secondaryAssigned++;
+  const resolved=provider==='secondary'?this.secondaryRequest(input,init):{input,init};
+  try{
+   const response=await limiter.fetch(resolved.input,resolved.init);
+   if(failedStatus(response.status)){
+    if(provider==='primary')this.primaryFailures++;else this.secondaryFailures++;
+    if(response.status!==429){
+     if(provider==='primary')this.primaryFailedUntil=Date.now()+this.failedForMs;
+     else this.secondaryFailedUntil=Date.now()+this.failedForMs;
     }
-    this.primaryFailures++;
-    if(primaryResponse.status!==429)this.primaryFailedUntil=Date.now()+this.failedForMs;
-   }catch(error){
-    this.primaryFailures++;
-    this.primaryFailedUntil=Date.now()+this.failedForMs;
-    primaryError=error;
+   }else{
+    this.activeProvider=provider;
+    if(provider==='secondary')this.secondarySuccesses++;
    }
+   return response;
+  }catch(error){
+   if(provider==='primary'){
+    this.primaryFailures++;this.primaryFailedUntil=Date.now()+this.failedForMs;
+   }else{
+    this.secondaryFailures++;this.secondaryFailedUntil=Date.now()+this.failedForMs;
+   }
+   throw error;
   }
-  if(!this.cooling(this.secondary,this.secondaryFailedUntil)){
-   this.failovers++;
-   this.lastFailoverAt=new Date().toISOString();
+ }
+ private async doFetch(input:Parameters<typeof fetch>[0],init?:RequestInit){
+  if(!this.secondary)return this.primary.fetch(input,init);
+  if(new URL(requestUrl(input)).toString()!==new URL(this.primaryUrl).toString())
+   throw new Error('RPC request target differs from configured primary endpoint');
+  const chosen:Provider=this.dualActive&&this.roundRobin++%2===1?'secondary':'primary';
+  const fallback:Provider=chosen==='primary'?'secondary':'primary';
+  let firstResponse:Response|undefined,firstError:unknown;
+  if(!this.cooling(chosen)){
    try{
-    const response=await this.secondary.fetch(backupInput,backupInit);
-    if(!isFailoverStatus(response.status)){
-     this.secondarySuccesses++;
-     this.activeProvider='secondary';
-     return response;
-    }
-    this.secondaryFailures++;
-    if(response.status!==429)this.secondaryFailedUntil=Date.now()+this.failedForMs;
-    // Expose the secondary provider's own response if it could not serve
-    // this request; do not silently pretend the quote is fresh.
+    firstResponse=await this.attempt(chosen,input,init);
+    if(!failedStatus(firstResponse.status))return firstResponse;
+   }catch(error){firstError=error}
+  }
+  if(!this.cooling(fallback)){
+   this.failovers++;this.lastFailoverAt=new Date().toISOString();
+   try{
+    const response=await this.attempt(fallback,input,init);
+    if(!failedStatus(response.status))return response;
     return response;
    }catch(error){
-    this.secondaryFailures++;
-    this.secondaryFailedUntil=Date.now()+this.failedForMs;
-    if(primaryResponse)return primaryResponse;
-    throw new Error('Both Solana RPC providers failed to serve this request');
+    if(firstResponse)return firstResponse;
+    if(firstError)throw new Error('Both Solana RPC providers failed to serve this request');
+    throw error;
    }
   }
-  if(primaryResponse)return primaryResponse;
-  if(primaryError)throw new Error('Primary RPC failed; backup RPC is cooling down');
+  if(firstResponse)return firstResponse;
+  if(firstError)throw new Error('Preferred RPC failed; alternate RPC cooling down');
   return new Response(JSON.stringify({error:'Both RPC providers are cooling down'}),{
    status:503,headers:{'content-type':'application/json'}
   });
  }
- readonly fetch:typeof globalThis.fetch=async (input,init)=>{
-  // One global transport queue shared by the account scanner, Raydium, and
-  // Orca SDK, even when two different RPC backends are configured.
-  let release!:()=>void;
-  const previous=this.serial;
-  this.serial=new Promise<void>(resolve=>{release=resolve;});
-  await previous;
-  try{return await this.doFetch(input,init);}
-  finally{release();}
+ readonly fetch:typeof globalThis.fetch=async(input,init)=>{
+  this.inFlight++;
+  this.peakInFlight=Math.max(this.peakInFlight,this.inFlight);
+  try{return await this.doFetch(input,init)}
+  finally{this.inFlight--}
  };
- snapshot():RpcFailoverSnapshot {
+ snapshot():RpcFailoverSnapshot{
   return {
-   mode:this.secondary?'failover':'single',activeProvider:this.activeProvider,
-   failovers:this.failovers,secondarySuccesses:this.secondarySuccesses,
-   primaryFailures:this.primaryFailures,secondaryFailures:this.secondaryFailures,
-   lastFailoverAt:this.lastFailoverAt,primary:this.primary.snapshot(),
-   secondary:this.secondary?.snapshot()
+   mode:this.dualActive?'dual_active':this.secondary?'failover':'single',
+   activeProvider:this.activeProvider,failovers:this.failovers,
+   secondarySuccesses:this.secondarySuccesses,primaryFailures:this.primaryFailures,
+   secondaryFailures:this.secondaryFailures,primaryAssigned:this.primaryAssigned,
+   secondaryAssigned:this.secondaryAssigned,inFlight:this.inFlight,
+   peakInFlight:this.peakInFlight,lastFailoverAt:this.lastFailoverAt,
+   primary:this.primary.snapshot(),secondary:this.secondary?.snapshot()
   };
  }
 }
