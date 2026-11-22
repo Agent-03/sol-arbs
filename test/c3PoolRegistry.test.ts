@@ -107,11 +107,12 @@ test('C3D.2 verifies ownership/mints, matches separate venues, and never quotes 
   assert.equal(s.crossDexPairs,1);
   assert.equal(s.readyTwoLegPairs,0);
   assert.equal(s.potentialTwoLegPairs,1);
-  assert.equal(s.unsupportedQuotePools,3);
+  assert.equal(s.unsupportedQuotePools,2);
   assert.deepEqual(s.perVenue.meteora,{tracked:2,ready:0});
   assert.deepEqual(s.perVenue.pumpswap,{tracked:1,ready:0});
-  assert.ok(s.pools.every(x=>x.quoteStatus==='unsupported'));
-  assert.ok(registry.supported().length===0,'No Meteora or Pump pool may enter graph quote adapters');
+  assert.equal(s.pools.filter(x=>x.quoteStatus==='unsupported').length,2);
+  assert.equal(s.pools.filter(x=>x.quoteStatus==='not_ready').length,1);
+  assert.equal(registry.supported().length,1,'Only DLMM has an exact-input quote adapter');
   // Do not change readiness even if an unsupported source appears in a
   // mock evaluator snapshot; there is no adapter to quote it.
   registry.observeReady([{address:p.address} as never]);
