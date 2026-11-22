@@ -68,6 +68,8 @@ export class C3Concentrated{
  private orcaFailures=new Map<string,string>();
  private running=false;private refreshing=false;
  private timer?:ReturnType<typeof setInterval>;
+ private snapshotTimer?:ReturnType<typeof setInterval>;
+ private snapshotRefreshing=false;
  private failures:string[]=[];
  private quoteAttempts=0;private quoteMisses=0;
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
@@ -210,6 +212,13 @@ export class C3Concentrated{
   this.running=true;
   void this.discoverOrca();
   this.timer=setInterval(()=>{void this.discoverOrca()},this.opts.refreshMs);
+  this.snapshotTimer=setInterval(()=>{
+   if(this.snapshotRefreshing||!this.running)return;
+   this.snapshotRefreshing=true;
+   void this.orca.refreshCachedSnapshots().then(()=>this.notify()).catch(error=>
+    this.error('Orca snapshot verification: '+String(error))
+   ).finally(()=>{this.snapshotRefreshing=false});
+  },Math.min(8000,Math.max(2500,Math.floor(this.opts.maxAgeMs/2))));
  }
  snapshot(now=Date.now()):{pools:GraphPool[];health:ConcentratedSnapshot}{
   const pools:GraphPool[]=[];
@@ -247,7 +256,7 @@ export class C3Concentrated{
     return {pool:c.address,pair:c.tokenA+'/'+c.tokenB,
      state:ready?'ready' as const:'not_ready' as const,
      reason:ready?undefined:this.orcaFailures.get(c.address)??
-      'tick_arrays_missing_or_snapshot_stale_or_slot_skew'};
+      this.orca.readiness(c.address,now).reason};
    });
   const clmmPools=clmmStatus.perPool.map(row=>{
    const pool=this.pools.get(row.pool);
@@ -272,6 +281,7 @@ export class C3Concentrated{
  stop(){
   this.running=false;
   if(this.timer)clearInterval(this.timer);
+  if(this.snapshotTimer)clearInterval(this.snapshotTimer);
   this.orca.stop();this.clmm.stop();this.clmmStarted=false;this.orcaFailures.clear();
   for(const release of this.orcaReleases.values())release();
   this.orcaReleases.clear();this.pools.clear();
