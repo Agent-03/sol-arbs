@@ -95,12 +95,13 @@ export type CoverageSummary={
 export function computeCoverage(
  rows:readonly PoolEligibility[],sizes:number,
  completeEstimates:number,freshnessQualified:number,
- positiveEstimates:number,negativeEstimates:number
+ positiveEstimates:number,negativeEstimates:number,
+ monitoredDirections:1|2=2
 ):CoverageSummary{
  const supported=rows.filter(r=>r.program!=='unsupported'&&r.state!=='excluded'&&r.state!=='not_selected');
  const ray=supported.filter(p=>p.program==='raydium_amm_v4'||p.program==='raydium_clmm');
  const orca=supported.filter(p=>p.program==='orca_whirlpool');
- const theoretical=ray.length*orca.length*sizes*2;
+ const theoretical=ray.length*orca.length*sizes*monitoredDirections;
  return {discoveredPools:rows.length,supportedEligiblePools:supported.length,
   activeQuotePools:rows.filter(r=>r.state==='active').length,
   poolsWaiting:rows.filter(r=>r.state==='waiting').length,
