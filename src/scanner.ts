@@ -13,8 +13,8 @@ export class Scanner{
  private lastPollAt?:string;
  private errors=0;
  private pollInFlight=false;
- constructor(private readonly config:Config){
-  this.conn=new Connection(config.rpcUrl,{commitment:'confirmed',wsEndpoint:config.wsUrl});
+ constructor(private readonly config:Config,connection?:Connection){
+  this.conn=connection??new Connection(config.rpcUrl,{commitment:'confirmed',wsEndpoint:config.wsUrl});
   this.journal=new Journal(config.dataDir);
  }
  private async record(event:PoolEvent){
