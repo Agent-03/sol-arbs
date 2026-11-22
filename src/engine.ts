@@ -2,6 +2,8 @@ import {PublicKey,type Connection} from '@solana/web3.js';
 import {discoverPools,type DiscoveredPool} from './discovery.js';
 import {LiveRaydiumMonitor,type LiveRaydiumEvent} from './liveRaydium.js';
 import {OrcaMonitor,type ArbitrageCandidate} from './orca.js';
+import {ClmmMonitor} from './clmm.js';
+import {classifyPoolEligibility,computeCoverage} from './poolEligibility.js';
 import {combineLiveQuotes,type LiveCombination} from './liveRoutes.js';
 import {buildCandidates,RAYDIUM_AMM_V4,ORCA_WHIRLPOOL,RAYDIUM_CLMM} from './routes.js';
 import {assessRoutes,type RouteSummary} from './opportunities.js';
@@ -13,14 +15,15 @@ import type {JupiterMonitor} from './jupiter.js';
 type Activity={id:number;at:string;level:'info'|'success'|'warning';kind:string;message:string};
 type History={at:string;comparable:number;positive:number;excluded:number;bestNetUsd:number|null;total:number};
 type Busy='idle'|'quoting'|'discovering'|'bootstrapping';
-type EventSource='raydium_ws'|'raydium_reconcile'|'orca_refresh';
-const emptyCombination=():LiveCombination=>({candidates:[],unmatchedReverseLegs:0,failed:0,evaluated:0});
+type EventSource='raydium_ws'|'raydium_reconcile'|'orca_refresh'|'clmm_refresh';
+const emptyCombination=():LiveCombination=>({candidates:[],unmatchedReverseLegs:0,failed:0,evaluated:0,clmmEvaluated:0});
 
 export class MarketEngine {
  private readonly pools:DiscoveredPool[];
  private topology:ReturnType<typeof buildCandidates>;
  private readonly ray:LiveRaydiumMonitor;
  private readonly orca:OrcaMonitor;
+ private readonly clmm:ClmmMonitor;
  private running=false;
  private busy:Busy='idle';
  private timer?:ReturnType<typeof setTimeout>;
@@ -82,10 +85,17 @@ export class MarketEngine {
    config.b5MaxComponentAgeMs,config.minQuoteLiquidityUsd,
    config.b5ReconcileMs,event=>this.onRaydiumEvent(event)
   );
+  this.clmm=new ClmmMonitor(conn,this.pools,config.b5QuoteSizesUsd,
+   config.minQuoteLiquidityUsd,config.b51ClmmMaxPools,
+   config.b51ClmmRefreshMs,config.b51ClmmMaxCacheAgeMs,
+   ()=>this.evaluate('clmm_refresh',Date.now(),false));
   this.orca=new OrcaMonitor(conn,this.pools,config.b5QuoteSizesUsd,
    ()=>this.ray.snapshot().quotes,config.jupiter.assumedCostUsd,
    config.b5OrcaRefreshMs,config.minQuoteLiquidityUsd,
-   ()=>this.evaluate('orca_refresh',Date.now(),false));
+   ()=>this.evaluate('orca_refresh',Date.now(),false),
+   config.freshness.maxAgeMs,
+   ()=>this.clmm.getBuys().map(q=>({pool:q.pool,inputRaw:q.inputRaw,
+    outputRaw:q.outputRaw,observedAt:q.observedAt,slot:q.poolSlot})));
   this.note('info','startup','B5 read-only engine initialized. Raydium vaults: WebSocket state; Orca: SDK refreshes.');
  }
  private note(level:Activity['level'],kind:string,message:string){
@@ -121,8 +131,10 @@ export class MarketEngine {
   const rayQuotes=this.ray.snapshot().quotes.filter(q=>active.has(q.pool));
   const orcaLegs=this.orca.snapshot().quotedLegs.filter(q=>active.has(q.pool));
   const liquidity=new Map(this.pools.map(p=>[p.address,p.liquidityUsd] as const));
+  const clmmBuys=this.clmm.getBuys();
   this.combination=combineLiveQuotes(rayQuotes,orcaLegs,
-   this.config.jupiter.assumedCostUsd,liquidity);
+   this.config.jupiter.assumedCostUsd,liquidity,clmmBuys,
+   (pool,amount)=>this.clmm.quoteExact(pool,'SOL_TO_USDC',amount));
   this.liveCandidates=this.combination.candidates;
   this.localEvaluations++;
   if(recordEvent)this.marketEventEvaluations++;
@@ -177,6 +189,7 @@ export class MarketEngine {
   try{
    await this.scanner.start();
    await this.ray.start();
+   this.clmm.start();
    this.note('success','feed','Raydium pool and vault subscriptions active; local pricing enabled.');
    this.busy='idle';
    this.schedule(100);
@@ -190,6 +203,7 @@ export class MarketEngine {
   this.running=false;
   if(this.timer)clearTimeout(this.timer);
   this.unsubscribeScanner?.();this.unsubscribeScanner=undefined;
+  this.clmm.stop();
   await this.ray.stop();
   await this.scanner.stop();
  }
@@ -254,6 +268,7 @@ export class MarketEngine {
   await this.scanner.replacePools(result.pools.map(p=>new PublicKey(p.address)));
   this.pools.splice(0,this.pools.length,...result.pools);
   await this.ray.replacePools();
+  void this.clmm.scanOnce();
   this.topology=buildCandidates(this.pools);
   this.lastDiscoveryAt=new Date().toISOString();
   this.discoveryStatus=result.warnings.length?'partial_error':'ok';
@@ -308,13 +323,17 @@ export class MarketEngine {
  assessment():RouteSummary{return this.evaluatedSummary();}
  dashboard(){
   const comparison=this.assessment();
-  const r=this.ray.snapshot(),o=this.orca.snapshot(),s=this.scanner.snapshot();
+  const r=this.ray.snapshot(),o=this.orca.snapshot(),s=this.scanner.snapshot(),cl=this.clmm.snapshot();
   const cover={
    raydiumV4:this.pools.filter(p=>p.owner===RAYDIUM_AMM_V4).length,
    orcaWhirlpool:this.pools.filter(p=>p.owner===ORCA_WHIRLPOOL).length,
-   raydiumClmmUnsupported:this.pools.filter(p=>p.owner===RAYDIUM_CLMM).length
+   raydiumClmm:this.pools.filter(p=>p.owner===RAYDIUM_CLMM).length
   };
   const rpc=this.rpc.snapshot();
+  const poolEligibility=classifyPoolEligibility(this.pools,r,o,cl,
+   this.config.minQuoteLiquidityUsd,this.config.b51ClmmMaxPools,this.config.freshness.maxAgeMs);
+  const coverage=computeCoverage(poolEligibility,this.config.b5QuoteSizesUsd.length,
+   comparison.total,comparison.comparable,comparison.positiveComparable,comparison.negativeComparable);
   const statuses=[
    {label:'Unprofitable',count:comparison.negativeComparable,reason:'Valid research comparisons with net ≤ 0'},
    {label:'Positive estimate',count:comparison.positiveComparable,reason:'Positive estimate; not simulated or executable'},
@@ -323,7 +342,7 @@ export class MarketEngine {
   ];
   const reasons=Object.entries(comparison.excludedByReason).sort((a,b)=>b[1]-a[1]);
   return {
-   phase:'B5',mode:'READ_ONLY',now:new Date().toISOString(),market:'SOL/USDC',
+   phase:'B5.1',mode:'READ_ONLY',now:new Date().toISOString(),market:'SOL/USDC',
    status:this.busy==='idle'?'monitoring':this.busy,
    scan:{status:this.busy,lastStartedAt:this.lastScanStartedAt,lastFinishedAt:this.lastScanAt,
     lastDurationMs:this.lastScanDurationMs,completedCycles:this.cycles,
@@ -341,10 +360,12 @@ export class MarketEngine {
     lastOrcaRefreshAt:this.lastOrcaFinishedAt,
     latency:this.percentiles(),latencyDefinition:'Milliseconds from local update callback receipt to local route recomputation (not chain-to-bot latency)',
     routeEvaluations:this.combination.evaluated,
+    clmmEvaluations:this.combination.clmmEvaluated,
     exactInputMisses:this.combination.unmatchedReverseLegs,
     evaluationFailures:this.combination.failed,
     statuses,topExclusionReason:reasons[0]?.[0]??null,
-    limitations:['Orca SDK tick arrays use RPC, not a full in-memory ticker',
+    limitations:['Orca SDK tick arrays use RPC, not a fully memory-resident quote engine',
+     'CLMM SDK pool/tick bitmap snapshots involve multiple independent RPC contexts',
      'Raydium vault-only CPMM ignores OpenBook open orders',
      'Slot proximity does not imply atomic same-state execution',
      'No transaction simulation, signing or broadcast']},
@@ -353,11 +374,12 @@ export class MarketEngine {
     intervalMs:this.discoveryInterval(),reason:this.lastDiscoveryReason,
     validatedCandidates:this.discoveryValidated,trackedPools:this.pools.length,
     newlyAdded:this.discoveryAdded,removed:this.discoveryRemoved,
-    quoteSupportedPools:this.pools.filter(p=>[RAYDIUM_AMM_V4,ORCA_WHIRLPOOL].includes(p.owner)&&
+    quoteSupportedPools:this.pools.filter(p=>[RAYDIUM_AMM_V4,RAYDIUM_CLMM,ORCA_WHIRLPOOL].includes(p.owner)&&
      (p.liquidityUsd===undefined||p.liquidityUsd>=this.config.minQuoteLiquidityUsd)).length,
-    lowLiquidityExcluded:this.pools.filter(p=>[RAYDIUM_AMM_V4,ORCA_WHIRLPOOL].includes(p.owner)&&
+    lowLiquidityExcluded:this.pools.filter(p=>[RAYDIUM_AMM_V4,RAYDIUM_CLMM,ORCA_WHIRLPOOL].includes(p.owner)&&
      p.liquidityUsd!==undefined&&p.liquidityUsd<this.config.minQuoteLiquidityUsd).length,
-    coverage:cover,theoreticalTopologies:this.topology.candidates.length,warnings:this.discoveryWarnings},
+    coverage:cover,eligibility:poolEligibility,utility:coverage,
+    theoreticalTopologies:this.topology.candidates.length,warnings:this.discoveryWarnings},
    opportunities:{total:comparison.total,comparable:comparison.comparable,
     excluded:comparison.excluded,positive:comparison.positiveComparable,
     negative:comparison.negativeComparable,bestComparableNetUsd:comparison.bestComparableNetUsd,
@@ -369,7 +391,12 @@ export class MarketEngine {
    raydium:{status:r.status,poolCount:r.poolCount,quotes:r.quotes.length,
     readyPools:r.readyPools,events:r.events,progress:r.progress,
     lastUpdatedAt:r.lastUpdatedAt,errors:[...r.errors,...Object.entries(r.poolReasons).map(([key,value])=>key+': '+value)].slice(0,6)},
+   clmm:{status:cl.status,selectedPools:cl.selectedPools,readyPools:cl.readyPools,
+    quotes:cl.quotes.length,scans:cl.scans,perPool:cl.perPool,
+    lastUpdatedAt:cl.lastUpdatedAt,errors:cl.errors.slice(0,6)},
    orca:{status:o.status,poolCount:o.orcaPools,quotedLegs:o.quotedLegs.length,
+    quoteState:o.quoteState,freshLegs:o.freshLegs,expiredLegs:o.expiredLegs,
+    poolFreshness:o.poolFreshness,tickArraysSlotVerified:o.tickArraysSlotVerified,
     lastUpdatedAt:o.lastUpdatedAt,progress:o.progress,errors:o.errors.slice(0,6)},
    feed:{status:s.status,stalePools:s.pools.filter(p=>p.stale).length,
     lastPollAt:s.lastPollAt,errors:s.errors},
@@ -386,5 +413,6 @@ export class MarketEngine {
   validatedCount:this.discoveryValidated,lastUpdatedAt:this.lastDiscoveryAt};}
  getRaydium(){return this.ray.snapshot();}
  getOrca(){return this.orca.snapshot();}
+ getClmm(){return this.clmm.snapshot();}
  getRunningStatus(){return {busy:this.busy,running:this.running};}
 }
