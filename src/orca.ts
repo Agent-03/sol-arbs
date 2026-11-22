@@ -62,7 +62,7 @@ export class OrcaMonitor{
  }
  constructor(private readonly connection:Connection,private readonly pools:DiscoveredPool[],
    private readonly sizesUsd:number[],private readonly getRaydiumQuotes:()=>AmmV4Quote[],
-   private readonly assumedCostUsd:number,private readonly intervalMs=60000){
+   private readonly assumedCostUsd:number,private readonly intervalMs=60000,private readonly minLiquidityUsd=0){
   // Ephemeral, unused local signing identity required by legacy SDK provider.
   // This service NEVER signs or broadcasts transactions.
   const provider=new AnchorProvider(connection,new Wallet(Keypair.generate()),{commitment:'confirmed'});
@@ -100,7 +100,7 @@ export class OrcaMonitor{
    return;
   }
   this.busy=true;
-  const orca=this.pools.filter(p=>(p.venue==='orca'||p.venue==='manual')&&p.owner===ORCA_WHIRLPOOL);
+  const orca=this.pools.filter(p=>(p.venue==='orca'||p.venue==='manual')&&p.owner===ORCA_WHIRLPOOL && (p.liquidityUsd===undefined||p.liquidityUsd>=this.minLiquidityUsd));
   this.state={...this.state,status:'scanning',progress:{totalPools:orca.length,completedPools:0,quotesCompleted:0,routesEstimated:0}};
   const legs:OrcaQuote[]=[],candidates:ArbitrageCandidate[]=[],errors:string[]=[];
   try{
