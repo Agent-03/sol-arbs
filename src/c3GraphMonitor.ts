@@ -85,7 +85,7 @@ export class C3GraphMonitor{
  private evaluation:GraphEvaluation;
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
   private readonly options:GraphMonitorOptions){
-  if(!Number.isSafeInteger(options.maxPools)||options.maxPools<1||options.maxPools>24||
+  if(!Number.isSafeInteger(options.maxPools)||options.maxPools<1||options.maxPools>40||
    !Number.isSafeInteger(options.perPair)||options.perPair<1||options.perPair>10||
    !Number.isSafeInteger(options.refreshMs)||options.refreshMs<60000||
    !Number.isSafeInteger(options.reconcileMs)||options.reconcileMs<5000)
@@ -266,11 +266,12 @@ export class C3GraphMonitor{
      if(owner!==RAYDIUM_AMM_V4&&owner!==RAYDIUM_CPMM)return;
      const candidate=block[i];
      try{
-      const state=owner===RAYDIUM_CPMM
-       ?decodeCpmmPool(info.data)
-       :decodeAmmV4AnyPair(candidate.address,info.data);
-      const onchainA=assetOfMint(owner===RAYDIUM_CPMM?state.mintA:state.baseMint);
-      const onchainB=assetOfMint(owner===RAYDIUM_CPMM?state.mintB:state.quoteMint);
+      const mints=owner===RAYDIUM_CPMM
+       ?(()=>{const s=decodeCpmmPool(info.data);return [s.mintA,s.mintB] as const})()
+       :(()=>{const s=decodeAmmV4AnyPair(candidate.address,info.data);
+          return [s.baseMint,s.quoteMint] as const})();
+      const onchainA=assetOfMint(mints[0]);
+      const onchainB=assetOfMint(mints[1]);
       if(!onchainA||!onchainB||
        !(onchainA===candidate.tokenA&&onchainB===candidate.tokenB||
          onchainB===candidate.tokenA&&onchainA===candidate.tokenB))return;
