@@ -194,6 +194,12 @@ export class MeteoraDlmmMonitor{
   this.candidates=[...retained,...eligible.filter(c=>!inUse.has(c.address))]
    .slice(0,this.opts.maxPools);
   const allowed=new Set(this.candidates.map(x=>x.address));
+  // Retained pools keep their active watches but receive updated, verified
+  // liquidity estimates and mint metadata from the current registry snapshot.
+  for(const candidate of this.candidates){
+   const entry=this.entries.get(candidate.address);
+   if(entry)entry.candidate=candidate;
+  }
   for(const address of this.entries.keys())
    if(!allowed.has(address))this.forget(address);
   for(const key of this.bootstrapRetry.keys())if(!allowed.has(key))
