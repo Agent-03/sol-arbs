@@ -118,14 +118,15 @@ export class OrcaMonitor{
    tickArraysObservedAt:tickReadStart,tickArraySlot:null,
    poolSlot,classification:'indicative_non_executable'};
  }
- async scanOnce(){
+ async scanOnce(onlyPools?:ReadonlySet<string>){
   if(this.busy)return;
   if(Date.now()<this.rateLimitedUntil){
    this.state={...this.state,status:'partial_error',errors:[`Rate-limit cooldown active until ${new Date(this.rateLimitedUntil).toISOString()}`]};
    return;
   }
   this.busy=true;
-  const orca=this.pools.filter(p=>(p.venue==='orca'||p.venue==='manual')&&p.owner===ORCA_WHIRLPOOL && (p.liquidityUsd===undefined||p.liquidityUsd>=this.minLiquidityUsd));
+  const allOrca=this.pools.filter(p=>(p.venue==='orca'||p.venue==='manual')&&p.owner===ORCA_WHIRLPOOL && (p.liquidityUsd===undefined||p.liquidityUsd>=this.minLiquidityUsd));
+  const orca=onlyPools?allOrca.filter(p=>onlyPools.has(p.address)):allOrca;
   this.state={...this.state,status:'scanning',progress:{totalPools:orca.length,completedPools:0,quotesCompleted:0,routesEstimated:0}};
   const legs:OrcaQuote[]=[],candidates:ArbitrageCandidate[]=[],errors:string[]=[];
   try{
@@ -196,10 +197,10 @@ export class OrcaMonitor{
    }
   }finally{
    this.busy=false;
-   this.book.retain(new Set(orca.map(p=>p.address)));
+   this.book.retain(new Set(allOrca.map(p=>p.address)));
    for(const pool of orca)this.book.fail(pool.address);
    this.state={status:errors.length?'partial_error':'ok',lastUpdatedAt:new Date().toISOString(),
-    quotedLegs:this.book.snapshot(Date.now(),this.maxQuoteAgeMs).entries,routeCandidates:candidates,errors,orcaPools:orca.length,progress:{totalPools:orca.length,completedPools:orca.length,quotesCompleted:legs.length,routesEstimated:candidates.length}};
+    quotedLegs:this.book.snapshot(Date.now(),this.maxQuoteAgeMs).entries,routeCandidates:candidates,errors,orcaPools:allOrca.length,progress:{totalPools:orca.length,completedPools:orca.length,quotesCompleted:legs.length,routesEstimated:candidates.length}};
   }
  }
  start(){if(this.running)return;this.running=true;const loop=async()=>{if(!this.running)return;try{await this.scanOnce();}catch(e){this.state={...this.state,status:'partial_error',errors:[String(e)]};}if(this.running)this.timer=setTimeout(()=>{void loop();},this.intervalMs);};void loop();}
