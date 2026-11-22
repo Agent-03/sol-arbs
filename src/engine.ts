@@ -24,6 +24,7 @@ export class MarketEngine {
  private readonly ray:LiveRaydiumMonitor;
  private readonly orca:OrcaMonitor;
  private readonly clmm:ClmmMonitor;
+ private readonly activeSizesUsd:number[];
  private running=false;
  private busy:Busy='idle';
  private timer?:ReturnType<typeof setTimeout>;
@@ -80,21 +81,23 @@ export class MarketEngine {
   private readonly manualPools:PublicKey[]
  ){
   this.pools=[...discovered.pools];
+  this.activeSizesUsd=config.b52OrcaQuoteMode==='fast'?
+   [Math.min(...config.b5QuoteSizesUsd)]:[...config.b5QuoteSizesUsd];
   this.topology=buildCandidates(this.pools);
   this.discoveryWarnings=discovered.warnings;
   this.discoveryValidated=discovered.validatedCount??discovered.pools.length;
   this.lastDiscoveryAt=new Date().toISOString();
   this.lastDiscoveryAttempt=Date.now();
   this.ray=new LiveRaydiumMonitor(
-   conn,this.pools,config.b5QuoteSizesUsd,config.ammMaxSlotSkew,
+   conn,this.pools,this.activeSizesUsd,config.ammMaxSlotSkew,
    config.b5MaxComponentAgeMs,config.minQuoteLiquidityUsd,
    config.b5ReconcileMs,event=>this.onRaydiumEvent(event)
   );
-  this.clmm=new ClmmMonitor(conn,this.pools,config.b5QuoteSizesUsd,
+  this.clmm=new ClmmMonitor(conn,this.pools,this.activeSizesUsd,
    config.minQuoteLiquidityUsd,config.b51ClmmMaxPools,
    config.b51ClmmRefreshMs,config.b51ClmmMaxCacheAgeMs,
    ()=>this.evaluate('clmm_refresh',Date.now(),false));
-  this.orca=new OrcaMonitor(conn,this.pools,config.b5QuoteSizesUsd,
+  this.orca=new OrcaMonitor(conn,this.pools,this.activeSizesUsd,
    ()=>this.ray.snapshot().quotes,config.jupiter.assumedCostUsd,
    config.b5OrcaRefreshMs,config.minQuoteLiquidityUsd,
    ()=>this.evaluate('orca_refresh',Date.now(),false),
@@ -357,7 +360,7 @@ export class MarketEngine {
   const rpc=this.rpc.snapshot();
   const poolEligibility=classifyPoolEligibility(this.pools,r,o,cl,
    this.config.minQuoteLiquidityUsd,this.config.b51ClmmMaxPools,this.config.freshness.maxAgeMs);
-  const coverage=computeCoverage(poolEligibility,this.config.b5QuoteSizesUsd.length,
+  const coverage=computeCoverage(poolEligibility,this.activeSizesUsd.length,
    comparison.total,comparison.comparable,comparison.positiveComparable,comparison.negativeComparable,
    this.config.b52OrcaQuoteMode==='fast'?1:2);
   const statuses=[
@@ -374,7 +377,7 @@ export class MarketEngine {
    scan:{status:this.busy,lastStartedAt:this.lastScanStartedAt,lastFinishedAt:this.lastScanAt,
     lastDurationMs:this.lastScanDurationMs,completedCycles:this.cycles,
     intervalMs:this.config.b5OrcaRefreshMs,nextAt:this.nextScanAt},
-   b5:{quoteMode:this.config.b52OrcaQuoteMode,
+   b5:{quoteMode:this.config.b52OrcaQuoteMode,activeSizesUsd:[...this.activeSizesUsd],
     monitoredDirections:this.config.b52OrcaQuoteMode==='fast'?['orca_to_raydium_amm_v4','orca_to_raydium_clmm']:['orca_to_raydium_amm_v4','orca_to_raydium_clmm','raydium_amm_v4_to_orca','raydium_clmm_to_orca'],
     architecture:'Raydium WebSocket pool/vault cache + local route math; Orca SDK refreshed on a bounded schedule',
     raydiumTransport:'WebSocket + periodic coherent-context HTTP reconciliation',
