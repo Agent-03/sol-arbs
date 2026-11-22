@@ -1254,3 +1254,81 @@ successful/attempted checks, recovery transitions, age, and per-pool
 readiness blockers. This update still does not execute transactions or
 guarantee positive cycles: it keeps verified quote sources available
 so changing price differences can be observed.
+
+
+## C3D.4.2 — Nonblocking DLMM quote-readiness scheduler
+
+C3D.4.1 diagnostics found that `refreshCycles` stayed fixed for
+20+ seconds while `refreshedPoolsLastCycle` slowly advanced. The old
+timer skipped every tick if a global refresh function was awaiting a
+slow pool or SDK reindex.
+
+**C3D.4.2 removes that global lock.** Each timer tick advances its
+own scheduling counter and dispatches up to the remaining read
+concurrency capacity, even when earlier pool refreshes are still in
+flight. A pool keeps a unique in-flight lock until the underlying
+network promise settles, including after the application's timeout.
+An additional cap limits total outstanding HTTP work. This is
+nonblocking across different pools but cannot make all providers
+available if the physical RPC transport itself is completely hung.
+
+- Routine per-pool RPC reads and bin-array SDK recovery now run in
+  separate, bounded lanes. A slow `getBinArrayForSwap` no longer
+  monopolizes the shared refresh cycle.
+- A timed-out response is **discarded before it can write to the shared
+  account cache**. The timeout is an application deadline and does
+  not forcibly abort an already-running Solana RPC request. The
+  per-pool lock remains until the physical operation finishes.
+- Bin-array window replacement is transactional from the monitor's
+  perspective: old subscriptions remain active until the replacement
+  state is verified; slow or timed-out recovery cannot commit its
+  candidate window afterward.
+- Repeated registry discovery refreshes retain previously selected,
+  still owner- and mint-verified pool IDs to avoid tearing down valid
+  DLMM subscriptions merely because TVL ranking changed.
+- The existing max quote age and slot skew thresholds remain strict.
+  HTTP success alone is **not** counted as a verified refresh if a
+  required account is missing or stale.
+
+### New controls
+
+```dotenv
+C3D42_DLMM_RPC_DEADLINE_MS=5500
+C3D42_DLMM_REINDEX_DEADLINE_MS=11000
+C3D42_DLMM_REINDEX_CONCURRENCY=2
+```
+
+These are separate from `C3D41_DLMM_REFRESH_BUDGET`,
+`C3D41_DLMM_REFRESH_CONCURRENCY`, and the 15-second
+`B4_MAX_QUOTE_AGE_MS` limit. Higher concurrency is not necessarily
+better; monitor the dual-RPC provider's latency and queue occupancy.
+
+### Validate the scheduler independently of market opportunities
+
+```powershell
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+$d = $g.dlmm
+
+$d | Select-Object ready,tracked,schedulerTicks,refreshCycles,
+  dispatchedLastTick,refreshAttempts,refreshSuccesses,
+  partialRefreshes,refreshFailures,rpcTimedOut,
+  rpcLateSettled,outstandingRpcReads,oldestOutstandingRpcMs,
+  refreshDurationMsAvg,refreshDurationMsP95,reindexInFlight,
+  reindexTimedOut,bootstrapAttempts,bootstrapFailures,
+  skippedInFlight,skippedCapacity |
+  Format-List
+
+$d.reasonCounts | Format-List
+$d.perPool | Select-Object pair,status,reason,oldestAgeMs,
+  continuousReadyMs,refreshDurationMs,refreshing,reindexing,
+  readTimedOut,refreshFailures | Format-Table -AutoSize
+```
+
+In healthy operation, `schedulerTicks` continues to increase even
+when an individual request is delayed or timed out.
+`outstandingRpcReads` may stay positive while a timed-out transport
+request resolves. That is intentional—the same pool will **not**
+receive overlapping account reads. `ready` can still vary with
+market activity and network latency, and a positive indicative quote
+is never a guarantee of executable profit. No wallet or transaction
+broadcast functionality is added.

@@ -33,6 +33,8 @@ export type GraphMonitorOptions={
  dlmmEnabled?:boolean;dlmmMaxPools?:number;dlmmConcurrency?:number;
  dlmmRefreshMs?:number;dlmmMaxArraysPerSide?:number;
  dlmmRefreshBudget?:number;dlmmRefreshConcurrency?:number;
+ dlmmRpcDeadlineMs?:number;dlmmReindexDeadlineMs?:number;
+ dlmmReindexConcurrency?:number;
 };
 export type GraphMonitorSnapshot=GraphEvaluation&{
  status:'disabled'|'discovering'|'warming'|'monitoring'|'partial_error'|'stopped';
@@ -150,7 +152,10 @@ export class C3GraphMonitor{
    minLiquidityUsd:options.minLiquidityUsd,
    maxArraysPerSide:options.dlmmMaxArraysPerSide??3,
    refreshBudget:options.dlmmRefreshBudget??8,
-   refreshConcurrency:options.dlmmRefreshConcurrency??4
+   refreshConcurrency:options.dlmmRefreshConcurrency??4,
+   rpcDeadlineMs:options.dlmmRpcDeadlineMs,
+   reindexDeadlineMs:options.dlmmReindexDeadlineMs,
+   reindexConcurrency:options.dlmmReindexConcurrency
   },()=>this.scheduleEvaluation());
   if(!options.enabled)this.status='disabled';
  }

@@ -21,6 +21,8 @@ export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;po
  c3d4DlmmConcurrency:number;c3d4DlmmRefreshMs:number;
  c3d4DlmmMaxArraysPerSide:number;
  c3d41DlmmRefreshBudget:number;c3d41DlmmRefreshConcurrency:number;
+ c3d42DlmmRpcDeadlineMs:number;c3d42DlmmReindexDeadlineMs:number;
+ c3d42DlmmReindexConcurrency:number;
  jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
@@ -145,6 +147,9 @@ export function loadConfig():Config{
   c3d4DlmmMaxArraysPerSide:positiveInteger('C3D4_DLMM_MAX_ARRAYS_PER_SIDE',3),
   c3d41DlmmRefreshBudget:positiveInteger('C3D41_DLMM_REFRESH_BUDGET',8),
   c3d41DlmmRefreshConcurrency:positiveInteger('C3D41_DLMM_REFRESH_CONCURRENCY',4),
+  c3d42DlmmRpcDeadlineMs:positiveInteger('C3D42_DLMM_RPC_DEADLINE_MS',5500),
+  c3d42DlmmReindexDeadlineMs:positiveInteger('C3D42_DLMM_REINDEX_DEADLINE_MS',11000),
+  c3d42DlmmReindexConcurrency:positiveInteger('C3D42_DLMM_REINDEX_CONCURRENCY',2),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};
