@@ -37,6 +37,12 @@ async function main(){
   tokenRefreshMs:config.c3dTokenRefreshMs,poolRequestBudget:config.c3dPoolQueryBudget,
   poolQueryConcurrency:config.c3dPoolConcurrency,apiKey:config.jupiter.apiKey,
   sizesSol:config.c3dSizesSol,assumedCostSol:config.c3dAssumedCostSol,
+  registryEnabled:config.c3d2RegistryEnabled,
+  registryTokensPerRefresh:config.c3d2RegistryTokensPerRefresh,
+  registryConcurrency:config.c3d2RegistryConcurrency,
+  registryMaxPools:config.c3d2RegistryMaxPools,
+  registryTtlMs:config.c3d2RegistryTtlMs,
+  registryMinLiquidityUsd:config.c3d2RegistryMinLiquidityUsd,
   maxPathChecks:config.c3GraphMaxPathChecks,maxResults:config.c3GraphMaxResults,
   minLiquidityUsd:config.c3dEnabled?config.c3dMinPoolLiquidityUsd:
    config.c3GraphMinLiquidityUsd,
@@ -99,6 +105,7 @@ async function main(){
    if(path==='/api/c3'){send(200,history.snapshot());return;}
    if(path==='/api/c3/graph'){send(200,c3Graph.snapshot());return;}
    if(path==='/api/c3/tokens'){send(200,c3Graph.snapshot().tokenDiscovery);return;}
+   if(path==='/api/c3/pools'){send(200,c3Graph.poolRegistrySnapshot());return;}
    if(path==='/api/market-data'){send(200,{phase:'C1',readOnly:true,...marketData.snapshot(),warning:'Account-state cache only; SDK tick arrays may be older or from unrelated RPC contexts.'});return;}
    if(path==='/api/explorer'){
     const d=dashboard();
@@ -107,7 +114,7 @@ async function main(){
     const raydium=engine.getRaydium().quotes;
     const clmm=engine.getClmm().quotes;
     send(200,{
-     mode:'READ_ONLY',observedAt:d.now,market:config.c3dEnabled?'dynamic wSOL/SPL':'SOL/USDC',phase:config.c3dEnabled?'C3D.1':d.phase,
+     mode:'READ_ONLY',observedAt:d.now,market:config.c3dEnabled?'dynamic wSOL/SPL':'SOL/USDC',phase:config.c3dEnabled?'C3D.2':d.phase,
      summary:{status:d.status,opportunities:d.opportunities,
       utility:d.discovery.utility,orca:d.orca,clmm:d.clmm,
       raydium:d.raydium,b5:d.b5,c1:d.c1,c2:d.c2,scan:d.scan,rpc:d.rpc,

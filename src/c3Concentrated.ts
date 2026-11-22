@@ -59,6 +59,9 @@ export class C3Concentrated{
  private readonly clmm:ClmmMonitor;
  private readonly pools=new Map<string,Candidate>();
  private readonly orcaReleases=new Map<string,()=>void>();
+ private registryOrca:Candidate[]=[];
+ private apiOrca:Candidate[]=[];
+ private orcaRegistryPending=false;
  private orcaValidated=0;
  private clmmValidated=0;
  private clmmStarted=false;
@@ -107,6 +110,19 @@ export class C3Concentrated{
   }
   return chosen;
  }
+ /** Registry-sourced Orca addresses are already program-owner/mint verified.
+  * They still pass through the existing Orca SDK pool/tick-array validation
+  * before becoming ready graph quote sources.
+  */
+ setRegistryOrcaCandidates(rows:ReadonlyArray<{
+  address:string;tokenA:GraphAsset;tokenB:GraphAsset;liquidityUsd:number
+ }>){
+  const selected=this.selected(rows.map(x=>({...x,program:'orca_whirlpool' as const})));
+  this.registryOrca=selected;
+  if(!this.running)return;
+  if(this.refreshing){this.orcaRegistryPending=true;return}
+  void this.discoverOrca();
+ }
  /** Raydium CLMM candidate addresses are already validated by C3 graph discovery. */
  async setRaydiumCandidates(rows:ReadonlyArray<{address:string;tokenA:GraphAsset;tokenB:GraphAsset;liquidityUsd:number}>){
   if(!this.running)return;
@@ -134,14 +150,20 @@ export class C3Concentrated{
   try{
    const controller=new AbortController();
    const timeout=setTimeout(()=>controller.abort(),8000);
-   let raw:unknown;
    try{
     const response=await fetch('https://api.orca.so/v2/solana/pools',{
      signal:controller.signal,headers:{accept:'application/json'}});
     if(!response.ok)throw Error('Orca discovery HTTP '+response.status);
-    raw=await response.json();
+    this.apiOrca=parseOrcaGraphCandidates(await response.json());
+   }catch(error){
+    this.error('Orca API discovery: '+String(error));
    }finally{clearTimeout(timeout)}
-   const rows=this.selected(parseOrcaGraphCandidates(raw));
+   // Keep already verified registry sources even when Orca's metadata API
+   // is unavailable; do not let API ordering hide another SOL/token pool.
+   const merged=new Map<string,Candidate>();
+   for(const c of [...this.registryOrca,...this.apiOrca])
+    if(!merged.has(c.address))merged.set(c.address,c);
+   const rows=this.selected([...merged.values()]);
    const verified:Candidate[]=[];
    for(let i=0;i<rows.length;i+=75){
     const batch=rows.slice(i,i+75);
@@ -175,7 +197,13 @@ export class C3Concentrated{
    }
    this.notify();
   }catch(error){this.error('C3C Orca discovery: '+String(error))}
-  finally{this.refreshing=false}
+  finally{
+   this.refreshing=false;
+   if(this.running&&this.orcaRegistryPending){
+    this.orcaRegistryPending=false;
+    void this.discoverOrca();
+   }
+  }
  }
  start(){
   if(this.running)return;
@@ -247,5 +275,6 @@ export class C3Concentrated{
   this.orca.stop();this.clmm.stop();this.clmmStarted=false;this.orcaFailures.clear();
   for(const release of this.orcaReleases.values())release();
   this.orcaReleases.clear();this.pools.clear();
+  this.registryOrca=[];this.apiOrca=[];this.orcaRegistryPending=false;
  }
 }
