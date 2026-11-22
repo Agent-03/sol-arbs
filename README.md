@@ -395,3 +395,30 @@ $d.opportunities.excludedByReason | ConvertTo-Json
 ```
 
 **Do not claim this fixes profitability:** even freshly aligned quotes can still be negative net; same-slot coherent Orca tick-array updates, fee estimation and transaction simulation remain unimplemented. The primary goal is to reduce quote acquisition time and get reproducible, sufficiently synchronized research comparisons before broadening execution capability.
+
+
+## New Activity Explorer UI (Solscan-style)
+
+The default homepage **`http://127.0.0.1:8787/`** now presents the scanner using a light, transaction-explorer-inspired layout with columns and badges similar to the shared DeFi activity screenshot. The original dark monitoring dashboard is preserved at **`http://127.0.0.1:8787/terminal`**.
+
+The explorer uses **real data from `GET /api/explorer`**, refreshed every three seconds:
+- **Route Estimates:** all current route estimates (not just the top 20), input/output USDC, assumed net, market venues, quote timestamps, and exact exclusion reasons. Filter by comparable, positive estimate or excluded.
+- **Swap Quotes:** raw Orca Whirlpool, Raydium AMM V4 and Raydium CLMM quote legs, marked Fresh or Expired based on the configured maximum observation age.
+- **Pool Coverage:** every discovered pool, reported TVL, quote count, adapter, status and detailed eligibility reason.
+- **Engine Activity:** actual recent engine events.
+- **Transactions:** explicitly states that there is **no transaction indexer yet**. Never invent signatures, on-chain fills or realized P&L.
+
+Every table supports local search, column sorting, status filters, 10/25/50-row pagination, a record-details drawer and CSV export for the filtered rows. Excel-formula-like CSV fields are escaped. CSV export uses the actual backend data, not a rendered mock.
+
+The explorer is **read-only** and contains **no transaction-signing, account connections or execution controls**. Positive estimates are *not* verified opportunities. The separate diagnostic dashboard and all legacy diagnostic API endpoints remain available.
+
+To use it on Windows PowerShell:
+
+```powershell
+git pull origin main
+npm.cmd run build
+npm.cmd test
+npm.cmd run dev
+```
+
+Open the new explorer at `http://127.0.0.1:8787/` and the original diagnostics at `http://127.0.0.1:8787/terminal`. A complete local TypeScript build and live browser run still need to be verified on the workstation.
