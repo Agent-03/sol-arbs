@@ -413,7 +413,7 @@ export class MarketEngine {
   ];
   const reasons=Object.entries(comparison.excludedByReason).sort((a,b)=>b[1]-a[1]);
   return {
-   phase:'C1',mode:'READ_ONLY',
+   phase:'C2',mode:'READ_ONLY',
    c1:market?{...market,streamingFeed:'Solana WebSocket account notifications; Yellowstone/Geyser transport not connected',
     localCalculation:'Raydium AMM v4 pool/vault states; CLMM and Orca SDK still request RPC-backed tick arrays'}:null,now:new Date().toISOString(),market:'SOL/USDC',
    status:this.busy==='idle'?'monitoring':this.busy,
