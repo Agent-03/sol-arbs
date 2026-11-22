@@ -32,8 +32,9 @@ export type OrcaStatus={status:'idle'|'scanning'|'ok'|'partial_error';lastUpdate
  lastBuyCount?:number;lastReverseCount?:number;lastPoolSetupMs?:number;
  localPricing?:LocalPricingHealth;
  referenceValidation?:{
-  running:boolean;checks:number;matches:number;mismatches:number;inconclusive:number;
-  last?:{pool:string;status:'match'|'mismatch'|'inconclusive'|'error';localRaw?:string;
+  running:boolean;requests:number;rejectedRequests:number;checks:number;matches:number;mismatches:number;inconclusive:number;
+  lastRejection?:string;
+  last?:{pool:string;status:'running'|'match'|'mismatch'|'inconclusive'|'error';localRaw?:string;
    sdkRaw?:string;deltaRaw?:string;poolSlot?:number;sdkPoolSlot?:number;
    durationMs:number;checkedAt:string;reason:string};
  };
@@ -76,6 +77,8 @@ export class OrcaMonitor{
  private readonly ctx:WhirlpoolContext;
  private readonly local?:LocalWhirlpoolQuoter;
  private validationRunning=false;
+ private validationRequests=0;private validationRejectedRequests=0;
+ private lastValidationRejection?:string;
  private referenceChecks=0;private referenceMatches=0;
  private referenceMismatches=0;private referenceInconclusive=0;
  private lastReference?:NonNullable<OrcaStatus['referenceValidation']>['last'];
@@ -108,35 +111,64 @@ export class OrcaMonitor{
   return {...this.state,quoteMode:this.quoteMode,quotedLegs:b.entries,quoteState:this.state.status==='scanning'?'refreshing':b.quoteState,
    freshLegs:b.freshLegs,expiredLegs:b.expiredLegs,poolFreshness:b.poolStatus,
    tickArraysSlotVerified:false,localPricing:this.local?.snapshot(),
-   referenceValidation:{running:this.validationRunning,checks:this.referenceChecks,
+   referenceValidation:{running:this.validationRunning,requests:this.validationRequests,
+    rejectedRequests:this.validationRejectedRequests,lastRejection:this.lastValidationRejection,
+    checks:this.referenceChecks,
     matches:this.referenceMatches,mismatches:this.referenceMismatches,
     inconclusive:this.referenceInconclusive,last:this.lastReference},
    routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};
  }
  hasLocalPricing(pool:string):boolean{return this.local?.hasReadySnapshot(pool)??false;}
- async validateReferenceOnce():Promise<{accepted:boolean;message:string}>{
-  if(this.validationRunning||this.busy)return {accepted:false,message:'RPC quote or validation is already running'};
-  if(!this.local)return {accepted:false,message:'C2 local quote cache is not configured'};
-  const pool=this.pools.find(p=>p.owner===ORCA_WHIRLPOOL&&this.local?.hasReadySnapshot(p.address));
-  if(!pool)return {accepted:false,message:'No locally ready Whirlpool with tick-array dependencies'};
+ requestReferenceValidation():{accepted:boolean;message:string}{
+  const reject=(message:string)=>{
+   this.validationRejectedRequests++;this.lastValidationRejection=message;
+   return {accepted:false,message};
+  };
+  if(this.validationRunning)return reject('C2 SDK reference comparison is already in progress');
+  if(this.busy)return reject('Orca RPC scan is running; retry when scanning finishes');
+  if(!this.local)return reject('Local C2 quoting is disabled');
+  const raw=BigInt(Math.round(this.sizesUsd[0]*1e6));
+  // Cache-ready does not imply a successful swap: a small, narrow Whirlpool
+  // may traverse beyond its initialized arrays at the requested input.
+  const pool=this.pools.find(p=>p.owner===ORCA_WHIRLPOOL&&
+   (p.venue==='orca'||p.venue==='manual')&&
+   this.local?.hasReadySnapshot(p.address)&&
+   this.local?.quoteExact(p.address,'USDC_TO_SOL',raw));
+  if(!pool)return reject('No quotable cached Whirlpool at input '+this.sizesUsd[0]+
+   ' USDC; inspect /api/c2 or retry after a pool/tick update');
   this.validationRunning=true;
-  const started=Date.now(),size=this.sizesUsd[0],raw=BigInt(Math.round(size*1e6));
-  const observed=new Date().toISOString();
+  this.validationRequests++;
+  this.lastValidationRejection=undefined;
+  this.lastReference={pool:pool.address,status:'running',durationMs:0,
+   checkedAt:new Date().toISOString(),
+   reason:'Read-only independent SDK/RPC quote comparison in progress'};
+  void this.performReferenceValidation(pool.address,raw).catch(error=>{
+   // Keep failures visible even when an unexpected throw escapes the normal
+   // quote-check path. Acknowledge only an actually started request.
+   this.referenceChecks++;this.referenceInconclusive++;
+   this.lastReference={pool:pool.address,status:'error',
+    checkedAt:new Date().toISOString(),durationMs:0,
+    reason:'Unhandled C2 comparison error: '+String(error)};
+  }).finally(()=>{this.validationRunning=false;});
+  return {accepted:true,message:'C2 SDK comparison started; poll /api/c2 until running=false'};
+ }
+ private async performReferenceValidation(poolAddress:string,raw:bigint):Promise<void>{
+  const started=Date.now(),observed=new Date().toISOString();
   let status:'match'|'mismatch'|'inconclusive'|'error'='inconclusive';
   let localRaw:string|undefined,sdkRaw:string|undefined,deltaRaw:string|undefined;
   let poolSlot:number|undefined,sdkPoolSlot:number|undefined;
   let reason='different RPC/tick-array contexts are not execution verification';
   try{
-   const before=this.local.quoteExact(pool.address,'USDC_TO_SOL',raw);
+   const before=this.local?.quoteExact(poolAddress,'USDC_TO_SOL',raw);
    if(!before)throw new Error('Local quote expired before SDK cross-check');
    localRaw=before.outputRaw;poolSlot=before.poolSlot;
-   const prepared=await this.preparePool(pool.address);
+   const prepared=await this.preparePool(poolAddress);
    sdkPoolSlot=prepared.poolSlot;
    const sdk=await swapQuoteByInputToken(prepared.pool,new PublicKey(USDC_MINT),
     new BN(raw.toString()),Percentage.fromFraction(0,10000),
     this.ctx.program.programId,this.client.getFetcher(),IGNORE_CACHE);
    sdkRaw=sdk.estimatedAmountOut.toString();
-   const after=this.local.quoteExact(pool.address,'USDC_TO_SOL',raw);
+   const after=this.local?.quoteExact(poolAddress,'USDC_TO_SOL',raw);
    if(!after||after.poolSlot!==before.poolSlot||
       after.outputRaw!==before.outputRaw||prepared.poolSlot!==before.poolSlot){
     status='inconclusive';
@@ -144,22 +176,20 @@ export class OrcaMonitor{
     this.referenceInconclusive++;
    }else{
     deltaRaw=(BigInt(sdkRaw)-BigInt(localRaw)).toString();
-    const matched=this.local.validateAgainstSdk(pool.address,'USDC_TO_SOL',raw.toString(),
+    const matched=this.local!.validateAgainstSdk(poolAddress,'USDC_TO_SOL',raw.toString(),
      sdkRaw,sdk.estimatedFeeAmount.toString());
     status=matched?'match':'mismatch';
-    reason=matched?'Exact raw output and fee match against RPC SDK quote; tick-array slots still not proven identical':
-     'Local output or fee differs from independent RPC SDK; snapshots may be from different tick-array slots';
+    reason=matched?'Exact raw output and fee match against RPC SDK; tick-array slots still not proven identical':
+     'Local output or fee differs; SDK tick-array snapshots may be from different slots';
     if(matched)this.referenceMatches++;else this.referenceMismatches++;
    }
    this.referenceChecks++;
   }catch(error){
    status='error';reason=String(error);this.referenceChecks++;this.referenceInconclusive++;
   }finally{
-   this.lastReference={pool:pool.address,status,localRaw,sdkRaw,deltaRaw,
+   this.lastReference={pool:poolAddress,status,localRaw,sdkRaw,deltaRaw,
     poolSlot,sdkPoolSlot,durationMs:Date.now()-started,checkedAt:observed,reason};
-   this.validationRunning=false;
   }
-  return {accepted:true,message:'C2 reference comparison finished: '+status};
  }
  private refreshLocalFromEvent(pool:string){
   if(!this.local)return;
@@ -198,6 +228,8 @@ export class OrcaMonitor{
   if(inputRaw<=0n)throw new Error('Invalid quote amount');
   const local=this.local?.quoteExact(poolAddress,direction,inputRaw);
   if(local)return {...local,classification:'indicative_non_executable'};
+  if(this.local?.isKnownUnquotable(poolAddress,direction,inputRaw))
+   throw new Error('C2 exact-input quote unavailable within covered tick-array range');
   if(!pool)throw new Error('Local pool state unavailable and SDK fallback not initialized');
   const inputMint=direction==='USDC_TO_SOL'?USDC_MINT:SOL_MINT;
   // Refresh tick arrays once per direction per cycle; subsequent size quotes use
@@ -251,6 +283,8 @@ export class OrcaMonitor{
       const raw=BigInt(Math.round(this.sizesUsd[0]*1e6));
       const cached=this.local.quoteExact(pool.address,'USDC_TO_SOL',raw);
       if(cached)prepared={pool:null,poolSlot:cached.poolSlot,observedAt:cached.observedAt};
+      else if(this.local.isKnownUnquotable(pool.address,'USDC_TO_SOL',raw))
+       throw new Error('Local exact-input swap exceeds available Whirlpool ticks; excluded until pool/tick state changes');
      }
      if(!prepared)prepared=await this.preparePool(pool.address);
      poolSetupMs+=Date.now()-prepStartedAt;
