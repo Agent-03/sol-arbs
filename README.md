@@ -1332,3 +1332,92 @@ receive overlapping account reads. `ready` can still vary with
 market activity and network latency, and a positive indicative quote
 is never a guarantee of executable profit. No wallet or transaction
 broadcast functionality is added.
+
+
+## C3D.4.3 — Quote-first RPC prioritization and demand-driven DLMM recovery
+
+Live diagnostics on C3D.4.2 revealed **six provider requests in flight**,
+**seven waiting**, a secondary 429, and multiple
+`rpc_refresh_deadline_exceeded` and
+`dlmm_bootstrap_arrays_timeout` events. Requests from discovery,
+SDK bootstraps, and live quote verification previously shared FIFO
+HTTP queues, so slow background work could delay 5.5-second quote
+deadlines.
+
+The shared dual-provider HTTP scheduler now has three traffic classes:
+
+| Priority | Workloads |
+| --- | --- |
+| **quotes** | DLMM exact-input pool/array reconciliation; Orca verified snapshot refresh; graph reserve reconciliation |
+| **normal** | Existing untagged scanner, health and general RPC work |
+| **background** | Token and pool discovery; DLMM SDK initialization; bin-array window recovery |
+
+- Both providers use an independent quote-first pending queue, with
+  a default limit of **one concurrent background HTTP request per
+  provider**. The queue is non-preemptive: requests already in flight
+  finish normally. An aging policy occasionally services an old
+  low-priority request after six quote grants, so essential discovery
+  cannot starve forever.
+- No HTTP payload, API key, or authentication header is changed to
+  communicate priority. A Node.js async context propagates task
+  classification through web3.js, Anchor and the Meteora SDK.
+- `/rpc` now reports per-provider:
+  `pendingByPriority`, `inFlightByPriority`,
+  `priorityDispatches`, `queueWaitMsAvg/P95` and
+  `transportMsAvg/P95`, plus oldest queued duration.
+- The DLMM monitor reports which deadline failed before transport
+  started (queue/pacing) versus during transport/response processing,
+  and the last queue/transport duration per pool.
+- DLMM bootstrap now defaults to **one SDK initialization at a
+  time**. Timed-out bootstrap's underlying promise retains a
+  physical lock until it actually settles. Unfinished work cannot
+  create an unbounded retry storm or initialize the same pool twice.
+- Fixed **30-second periodic SDK reindexing is removed**. A new
+  bin-array window is requested when the verified pool's active ID
+  crosses a 70-bin array boundary, or when a real quote or required
+  window validation fails. Normal account refresh remains continuous.
+  Existing owner, freshness, slot consistency and full-input quote
+  checks are unchanged.
+
+### Settings
+
+```dotenv
+RPC_BACKGROUND_MAX_CONCURRENT=1
+RPC_SECONDARY_BACKGROUND_MAX_CONCURRENT=1
+C3D43_DLMM_BOOTSTRAP_CONCURRENCY=1
+# Existing 4.2 RPC deadlines and 4.1 quote refresh budget remain applicable.
+```
+
+Defaults are applied even if the new variables are absent from an
+older `.env`. Increasing background capacity is **not** recommended
+when RPC provider queues or 429s are already nonzero.
+
+### Verification
+
+```powershell
+$r = Invoke-RestMethod http://127.0.0.1:8787/rpc
+$r.primary | Select-Object pendingByPriority,inFlightByPriority,
+  queueWaitMsP95,transportMsP95,backgroundMaxConcurrent,rateLimits |
+  Format-List
+$r.secondary | Select-Object pendingByPriority,inFlightByPriority,
+  queueWaitMsP95,transportMsP95,backgroundMaxConcurrent,rateLimits |
+  Format-List
+
+$g = Invoke-RestMethod http://127.0.0.1:8787/api/c3/graph
+$g.dlmm | Select-Object tracked,ready,refreshSuccesses,rpcTimedOut,
+  queueDeadlineExceeded,transportDeadlineExceeded,
+  bootstrapConcurrency,bootstrapPhysicalInFlight,bootstrapDeferred,
+  windowShiftReindexes,reindexAttempts,reindexTimedOut |
+  Format-List
+
+$g.dlmm.reasonCounts | Format-List
+$g.dlmm.perPool | Where-Object {$_.status -ne 'ready'} |
+ Select-Object pair,reason,rpcQueueWaitMs,rpcTransportMs,rpcTimeoutCause |
+ Format-Table -AutoSize
+```
+
+**Expected change:** when background bootstraps are busy, quote
+refresh requests should still advance and have lower queue wait times.
+Actual quote-ready pool counts depend on live provider latency and
+available pool liquidity. This is a read-only research monitor;
+positive indicative differences are not executable guaranteed profit.
