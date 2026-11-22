@@ -35,7 +35,7 @@ type Entry={
  candidate:Candidate;sdk:DLMM;binX:string[];binY:string[];bitmap:string|null;
  releases:Map<string,()=>void>;lastReindexAt:number;
  lastQuoteAt?:string;quoteFailure?:string;needsReindex?:boolean;
- lastVerifiedAt?:number;lastAttemptAt?:number;retryAfter?:number;
+ lastVerifiedAt?:number;lastAttemptAt?:number;retryAfter?:number;refreshing?:boolean;
  refreshFailures?:number;notReadySince?:number;lastReady?:boolean;
 };
 type Observed={data:Buffer;verifiedAt:number;verifiedSlot:number;owner:string};
@@ -220,7 +220,10 @@ export class MeteoraDlmmMonitor{
    entry={candidate,sdk,binX:[],binY:[],bitmap:null,
     releases:new Map(),lastReindexAt:0};
    await this.updateArrays(entry);
-   if(!this.running){entry.releases.forEach(release=>release());return}
+   if(!this.running||!this.candidates.some(x=>x.address===candidate.address)){
+    entry.releases.forEach(release=>release());this.feed.clearDependencies(ctxPrefix+candidate.address);
+    return;
+   }
    this.entries.set(candidate.address,entry);
    this.errors=this.errors.filter(x=>!x.startsWith(candidate.address+':'));
    this.bootstrapRetry.delete(candidate.address);
@@ -264,7 +267,8 @@ export class MeteoraDlmmMonitor{
  private async refreshEntry(entry:Entry):Promise<void>{
   const address=entry.candidate.address;
   if(!this.running||!this.entries.has(address))return;
-  entry.lastAttemptAt=Date.now();this.refreshAttempts++;
+  const wasReady=this.state(entry).ok;
+  entry.refreshing=true;entry.lastAttemptAt=Date.now();this.refreshAttempts++;
   this.refreshInFlight++;
   this.peakRefreshInFlight=Math.max(this.peakRefreshInFlight,this.refreshInFlight);
   try{
@@ -275,6 +279,7 @@ export class MeteoraDlmmMonitor{
    if(!this.running||this.entries.get(address)!==entry)return;
    entry.lastVerifiedAt=Date.now();entry.refreshFailures=0;
    entry.retryAfter=0;this.refreshSuccesses++;this.verifiedAccountRefreshes++;
+   this.errors=this.errors.filter(x=>!x.startsWith(address+': refresh '));
    // Refresh bin array windows after state changes or SDK partial-fill errors.
    if(entry.needsReindex||Date.now()-entry.lastReindexAt>30000){
     try{await this.updateArrays(entry);entry.quoteFailure=undefined}
@@ -284,7 +289,8 @@ export class MeteoraDlmmMonitor{
     }
    }
    const ready=this.state(entry);
-   if(ready.ok&&entry.lastReady===false)this.recoveryCount++;
+   if(ready.ok&&(entry.lastReady===false||
+     entry.lastReady===true&&!wasReady))this.recoveryCount++;
    entry.lastReady=ready.ok;
    if(ready.ok)entry.notReadySince=undefined;
    else entry.notReadySince??=Date.now();
@@ -295,7 +301,7 @@ export class MeteoraDlmmMonitor{
    this.refreshFailures++;
    entry.quoteFailure='rpc_reconcile:'+message(error);
    this.report(address+': refresh '+message(error));
-  }finally{this.refreshInFlight--}
+  }finally{entry.refreshing=false;this.refreshInFlight--}
  }
  async refresh():Promise<void>{
   if(!this.running||this.refreshing)return;
@@ -324,7 +330,10 @@ export class MeteoraDlmmMonitor{
    if(!this.running)return;
    this.lastRefreshAt=new Date().toISOString();
    this.onChange();
-   this.status=this.errors.length&&this.refreshFailures?'partial_error':'ready';
+   this.status=this.pending.size>0&&!this.entries.size?'warming':
+    [...this.entries.values()].some(x=>(x.refreshFailures??0)>0)||
+    this.errors.some(x=>x.startsWith('DLMM refresh planner:'))?
+    'partial_error':'ready';
   }catch(error){
    this.report('DLMM refresh planner: '+message(error));this.status='partial_error';
   }finally{this.refreshing=false}
@@ -454,8 +463,7 @@ export class MeteoraDlmmMonitor{
     lastQuoteAt:entry?.lastQuoteAt,lastVerifiedAt:entry?.lastVerifiedAt?
      new Date(entry.lastVerifiedAt).toISOString():undefined,
     refreshFailures:entry?.refreshFailures??0,
-    refreshing:!!entry&&!!entry.lastAttemptAt&&
-     entry.lastAttemptAt>=(entry.lastVerifiedAt??0)&&this.refreshInFlight>0,
+    refreshing:entry?.refreshing??false,
     notReadyForMs:value.ok?null:Math.max(0,now-(entry?.notReadySince??now))};
   });
   const reasonCounts:Record<string,number>={};
