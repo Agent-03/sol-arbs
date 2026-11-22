@@ -98,7 +98,8 @@ export class MarketEngine {
    ()=>this.evaluate('orca_refresh',Date.now(),false),
    config.freshness.maxAgeMs,
    ()=>this.clmm.getBuys().map(q=>({pool:q.pool,inputRaw:q.inputRaw,
-    outputRaw:q.outputRaw,observedAt:q.observedAt,slot:q.poolSlot})));
+    outputRaw:q.outputRaw,observedAt:q.observedAt,slot:q.poolSlot})),
+   config.b52OrcaQuoteMode);
   this.note('info','startup','B5 read-only engine initialized. Raydium vaults: WebSocket state; Orca: SDK refreshes.');
  }
  private note(level:Activity['level'],kind:string,message:string){
@@ -344,7 +345,8 @@ export class MarketEngine {
   const poolEligibility=classifyPoolEligibility(this.pools,r,o,cl,
    this.config.minQuoteLiquidityUsd,this.config.b51ClmmMaxPools,this.config.freshness.maxAgeMs);
   const coverage=computeCoverage(poolEligibility,this.config.b5QuoteSizesUsd.length,
-   comparison.total,comparison.comparable,comparison.positiveComparable,comparison.negativeComparable);
+   comparison.total,comparison.comparable,comparison.positiveComparable,comparison.negativeComparable,
+   this.config.b52OrcaQuoteMode==='fast'?1:2);
   const statuses=[
    {label:'Unprofitable',count:comparison.negativeComparable,reason:'Valid research comparisons with net ≤ 0'},
    {label:'Positive estimate',count:comparison.positiveComparable,reason:'Positive estimate; not simulated or executable'},
@@ -358,7 +360,9 @@ export class MarketEngine {
    scan:{status:this.busy,lastStartedAt:this.lastScanStartedAt,lastFinishedAt:this.lastScanAt,
     lastDurationMs:this.lastScanDurationMs,completedCycles:this.cycles,
     intervalMs:this.config.b5OrcaRefreshMs,nextAt:this.nextScanAt},
-   b5:{architecture:'Raydium WebSocket pool/vault cache + local route math; Orca SDK refreshed on a bounded schedule',
+   b5:{quoteMode:this.config.b52OrcaQuoteMode,
+    monitoredDirections:this.config.b52OrcaQuoteMode==='fast'?['orca_to_raydium_amm_v4','orca_to_raydium_clmm']:['orca_to_raydium_amm_v4','orca_to_raydium_clmm','raydium_amm_v4_to_orca','raydium_clmm_to_orca'],
+    architecture:'Raydium WebSocket pool/vault cache + local route math; Orca SDK refreshed on a bounded schedule',
     raydiumTransport:'WebSocket + periodic coherent-context HTTP reconciliation',
     orcaTransport:'SDK/RPC refreshed on pool changes with cooldown, plus periodic refresh',
     marketEvents:this.marketEvents,localRecomputations:r.localRecomputations,
@@ -407,6 +411,10 @@ export class MarketEngine {
     lastUpdatedAt:cl.lastUpdatedAt,errors:cl.errors.slice(0,6)},
    orca:{status:o.status,poolCount:o.orcaPools,quotedLegs:o.quotedLegs.length,
     quoteState:o.quoteState,freshLegs:o.freshLegs,expiredLegs:o.expiredLegs,
+    quoteMode:o.quoteMode,lastScanDurationMs:o.lastScanDurationMs,
+    lastFirstBuyDelayMs:o.lastFirstBuyDelayMs,
+    lastBuyCount:o.lastBuyCount,lastReverseCount:o.lastReverseCount,
+    lastPoolSetupMs:o.lastPoolSetupMs,
     poolFreshness:o.poolFreshness,tickArraysSlotVerified:o.tickArraysSlotVerified,
     lastUpdatedAt:o.lastUpdatedAt,progress:o.progress,errors:o.errors.slice(0,6)},
    feed:{status:s.status,stalePools:s.pools.filter(p=>p.stale).length,
