@@ -19,7 +19,7 @@ async function main(){
  if(!discovered.pools.length)console.warn('No validated pool accounts found: pool feed disabled; Jupiter quote monitor remains read-only.');
  config.pools=discovered.pools.map(p=>new PublicKey(p.address));
  const routes=buildCandidates(discovered.pools);
- const ammV4=new AmmV4Monitor(validationConnection,discovered.pools,config.jupiter.sizesUsd,config.ammScanIntervalMs);
+ const ammV4=new AmmV4Monitor(validationConnection,discovered.pools,config.jupiter.sizesUsd,config.ammScanIntervalMs,config.ammMaxSlotSkew);
  await ammV4.scanOnce();
  ammV4.start();
  const orca=new OrcaMonitor(validationConnection,discovered.pools,config.jupiter.sizesUsd,()=>ammV4.snapshot().quotes,config.jupiter.assumedCostUsd,config.orcaScanIntervalMs);
