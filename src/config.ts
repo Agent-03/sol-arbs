@@ -3,7 +3,7 @@ import { PublicKey } from '@solana/web3.js';
 import type {QuoteConfig} from './jupiter.js';
 import type {RpcLimitOptions} from './rpc.js';
 import type {FreshnessRules} from './opportunities.js';
-export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;pools:PublicKey[];maxPools:number;pollIntervalMs:number;staleAfterMs:number;port:number;dataDir:string;ammScanIntervalMs:number;ammMaxSlotSkew:number;orcaScanIntervalMs:number;rpcLimit:RpcLimitOptions;freshness:FreshnessRules;minQuoteLiquidityUsd:number;discoveryRefreshMs:number;noProfitDiscoveryMs:number;b5MaxComponentAgeMs:number;b5ReconcileMs:number;b5OrcaRefreshMs:number;b5OrcaMinTriggerMs:number;b5QuoteSizesUsd:number[];jupiter:QuoteConfig;};
+export type Config={rpcUrl:string;backupRpcUrl?:string;wsUrl:string|undefined;pools:PublicKey[];maxPools:number;pollIntervalMs:number;staleAfterMs:number;port:number;dataDir:string;ammScanIntervalMs:number;ammMaxSlotSkew:number;orcaScanIntervalMs:number;rpcLimit:RpcLimitOptions;freshness:FreshnessRules;minQuoteLiquidityUsd:number;discoveryRefreshMs:number;noProfitDiscoveryMs:number;b5MaxComponentAgeMs:number;b5ReconcileMs:number;b5OrcaRefreshMs:number;b5OrcaMinTriggerMs:number;b5QuoteSizesUsd:number[];b51ClmmMaxPools:number;b51ClmmRefreshMs:number;b51ClmmMaxCacheAgeMs:number;jupiter:QuoteConfig;};
 function positiveInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<=0)throw new Error(`${key} must be a positive integer`);return n;}
 function nonNegativeInteger(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isSafeInteger(n)||n<0)throw new Error(`${key} must be a nonnegative integer`);return n;}
 function nonNegativeNumber(key:string,fallback:number){const n=Number(process.env[key]??fallback);if(!Number.isFinite(n)||n<0)throw new Error(`${key} must be a nonnegative number`);return n;}
@@ -34,6 +34,9 @@ export function loadConfig():Config{
   b5OrcaRefreshMs:positiveInteger('B5_ORCA_REFRESH_MS',15000),
   b5OrcaMinTriggerMs:positiveInteger('B5_ORCA_EVENT_COOLDOWN_MS',12000),
   b5QuoteSizesUsd:sizes('B5_QUOTE_SIZES_USD','5,10,25'),
+  b51ClmmMaxPools:positiveInteger('B5_1_CLMM_MAX_POOLS',3),
+  b51ClmmRefreshMs:positiveInteger('B5_1_CLMM_REFRESH_MS',45000),
+  b51ClmmMaxCacheAgeMs:positiveInteger('B5_1_CLMM_MAX_CACHE_AGE_MS',60000),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};
