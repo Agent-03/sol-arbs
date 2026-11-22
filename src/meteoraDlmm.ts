@@ -18,6 +18,8 @@ export type DlmmPoolReadiness={
  reason?:string;quoteFailure?:string;binArrays:number;oldestAgeMs:number|null;
  slotGap:number|null;lastQuoteAt?:string;lastVerifiedAt?:string;
  refreshFailures:number;refreshing:boolean;notReadyForMs:number|null;
+ refreshDurationMs:number|null;reindexing:boolean;readTimedOut:boolean;
+ lastTimeoutAt?:string;readySince?:string;continuousReadyMs:number|null;
 };
 export type DlmmHealth={
  status:'disabled'|'warming'|'ready'|'partial_error'|'stopped';
@@ -29,6 +31,13 @@ export type DlmmHealth={
  refreshedPoolsLastCycle:number;refreshBudget:number;refreshConcurrency:number;
  effectiveRefreshMs:number;oldestAccountAgeMs:number|null;
  reasonCounts:Record<string,number>;recoveryCount:number;backoffPools:number;
+ schedulerTicks:number;dispatchedLastTick:number;skippedInFlight:number;
+ skippedCapacity:number;skippedBackoff:number;outstandingRpcReads:number;
+ oldestOutstandingRpcMs:number;rpcDeadlineMs:number;rpcTimedOut:number;
+ rpcLateSettled:number;partialRefreshes:number;refreshDurationMsP95:number;
+ refreshDurationMsAvg:number;reindexInFlight:number;reindexAttempts:number;
+ reindexSuccesses:number;reindexFailures:number;reindexTimedOut:number;
+ bootstrapInFlight:number;
 };
 type Candidate={address:string;mintA:string;mintB:string;liquidityUsd:number};
 type Entry={
@@ -37,6 +46,9 @@ type Entry={
  lastQuoteAt?:string;quoteFailure?:string;needsReindex?:boolean;
  lastVerifiedAt?:number;lastAttemptAt?:number;retryAfter?:number;refreshing?:boolean;
  refreshFailures?:number;notReadySince?:number;lastReady?:boolean;
+ refreshDurationMs?:number;readTimedOut?:boolean;lastTimeoutAt?:number;
+ readySince?:number;reindexing?:boolean;reindexRetryAfter?:number;
+ reindexFailures?:number;
 };
 type Observed={data:Buffer;verifiedAt:number;verifiedSlot:number;owner:string};
 const ctxPrefix='c3dlmm:';
@@ -78,7 +90,7 @@ export class MeteoraDlmmMonitor{
  private readonly entries=new Map<string,Entry>();
  private candidates:Candidate[]=[];
  private readonly pending=new Set<string>();
- private running=false;private refreshing=false;
+ private running=false;
  private timer?:ReturnType<typeof setInterval>;
  private eventRelease?:()=>void;
  private status:DlmmHealth['status']='disabled';
@@ -90,14 +102,26 @@ export class MeteoraDlmmMonitor{
  private refreshFailures=0;private refreshInFlight=0;private peakRefreshInFlight=0;
  private refreshedPoolsLastCycle=0;private recoveryCount=0;
  private readonly bootstrapRetry=new Map<string,{until:number;failures:number}>();
+ private readonly rpcReads=new Map<string,{entry:Entry;startedAt:number;promise:Promise<void>;timedOut:boolean}>();
+ private readonly reindexes=new Map<string,{entry:Entry;startedAt:number;promise:Promise<void>}>();
+ private schedulerTicks=0;private dispatchedLastTick=0;
+ private skippedInFlight=0;private skippedCapacity=0;private skippedBackoff=0;
+ private rpcTimedOut=0;private rpcLateSettled=0;private partialRefreshes=0;
+ private reindexAttempts=0;private reindexSuccesses=0;private reindexFailures=0;
+ private reindexTimedOut=0;
+ private readonly timings:number[]=[];
+ private readonly rpcDeadlineMs:number;private readonly reindexDeadlineMs:number;
+ private readonly maxOutstandingRpc:number;private readonly maxOutstandingReindex:number;
  private readonly refreshBudget:number;private readonly refreshConcurrency:number;
  private readonly effectiveRefreshMs:number;
+ private readonly reindexConcurrency:number;
  private lastRefreshAt?:string;
  constructor(private readonly rpc:Connection,private readonly feed:MarketDataFeed,
   private readonly opts:{
    enabled:boolean;maxPools:number;maxAgeMs:number;maxSlotSkew:number;
    refreshMs:number;concurrency:number;minLiquidityUsd:number;maxArraysPerSide:number;
    refreshBudget?:number;refreshConcurrency?:number;
+   rpcDeadlineMs?:number;reindexDeadlineMs?:number;reindexConcurrency?:number;
   },
   private readonly onChange:()=>void){
   if(!Number.isSafeInteger(opts.maxPools)||opts.maxPools<1||opts.maxPools>40||
@@ -113,6 +137,20 @@ export class MeteoraDlmmMonitor{
    this.refreshBudget>32||!Number.isSafeInteger(this.refreshConcurrency)||
    this.refreshConcurrency<1||this.refreshConcurrency>12)
    throw Error('Invalid DLMM per-tick refresh budget');
+  this.rpcDeadlineMs=opts.rpcDeadlineMs??Math.min(6000,Math.max(1500,
+   Math.floor(opts.maxAgeMs*0.4)));
+  this.reindexDeadlineMs=opts.reindexDeadlineMs??Math.max(2500,Math.min(12000,
+   opts.maxAgeMs-1000));
+  const reindexConcurrency=opts.reindexConcurrency??2;
+  if(!Number.isSafeInteger(this.rpcDeadlineMs)||this.rpcDeadlineMs<200||
+   this.rpcDeadlineMs>=opts.maxAgeMs||
+   !Number.isSafeInteger(this.reindexDeadlineMs)||this.reindexDeadlineMs<200||
+   !Number.isSafeInteger(reindexConcurrency)||reindexConcurrency<1||
+   reindexConcurrency>4)throw Error('Invalid C3D.4.2 RPC/reindex timeout settings');
+  this.maxOutstandingRpc=Math.min(opts.maxPools,
+   Math.max(this.refreshConcurrency,this.refreshConcurrency*2));
+  this.maxOutstandingReindex=Math.min(opts.maxPools,reindexConcurrency*2);
+  this.reindexConcurrency=reindexConcurrency;
   // Refresh every pool at least twice per maxAge window *at target latency*
   // even if the user's existing .env retains C3D4_DLMM_REFRESH_MS=8000.
   // No freshness/slot limits are relaxed to make metrics look better.
@@ -136,7 +174,7 @@ export class MeteoraDlmmMonitor{
  setCandidates(rows:readonly RegistryPool[]){
   if(!this.running)return;
   const sol=GRAPH_ASSETS.SOL.mint;
-  this.candidates=rows
+  const eligible=rows
    .filter(x=>x.program==='meteora_dlmm'&&x.owner===METEORA_DLMM&&
     x.liquidityUsd>=this.opts.minLiquidityUsd&&
     assetOfMint(x.mintA)!==undefined&&assetOfMint(x.mintB)!==undefined)
@@ -144,7 +182,16 @@ export class MeteoraDlmmMonitor{
     liquidityUsd:x.liquidityUsd}))
    .sort((a,b)=>Number(b.mintA===sol||b.mintB===sol)-
     Number(a.mintA===sol||a.mintB===sol)||
-    b.liquidityUsd-a.liquidityUsd)
+    b.liquidityUsd-a.liquidityUsd);
+  const found=new Map(eligible.map(c=>[c.address,c]));
+  // Preserve selected verified pool identities across liquidity rank changes.
+  // New hints fill vacancies but cannot churn existing subscriptions every refresh.
+  const retained=this.candidates.flatMap(c=>{
+   const current=found.get(c.address);
+   return current?[current]:[];
+  });
+  const inUse=new Set(retained.map(c=>c.address));
+  this.candidates=[...retained,...eligible.filter(c=>!inUse.has(c.address))]
    .slice(0,this.opts.maxPools);
   const allowed=new Set(this.candidates.map(x=>x.address));
   for(const address of this.entries.keys())
@@ -158,6 +205,8 @@ export class MeteoraDlmmMonitor{
   entry.releases.forEach(release=>release());
   entry.releases.clear();this.entries.delete(address);
   this.feed.clearDependencies(ctxPrefix+address);
+  // Outstanding RPC work remains locked until the actual transport settles.
+  // Its late result cannot reattach this removed pool.
  }
  private arrays(entry:Entry){
   return unique([...entry.binX,...entry.binY]);
@@ -166,10 +215,9 @@ export class MeteoraDlmmMonitor{
   const obs=this.feed.get(address);
   return obs?core(obs):null;
  }
- private async updateArrays(entry:Entry):Promise<void>{
+ private async updateArrays(entry:Entry,stillValid:()=>boolean=()=>true):Promise<void>{
   const sdk=entry.sdk;
-  // getBinArrayForSwap uses sdk.lbPair.activeId. Never search the next
-  // array window using the pool state frozen at SDK initialization.
+  if(!stillValid())throw Error('bin_window_superseded');
   const latest=this.observed(entry.candidate.address);
   if(latest){
    sdk.lbPair=sdk.program.coder.accounts.decode('lbPair',latest.data) as typeof sdk.lbPair;
@@ -180,26 +228,38 @@ export class MeteoraDlmmMonitor{
    }
   }
   const x=await sdk.getBinArrayForSwap(true,this.opts.maxArraysPerSide);
+  if(!stillValid())throw Error('bin_window_superseded');
   const y=await sdk.getBinArrayForSwap(false,this.opts.maxArraysPerSide);
+  if(!stillValid())throw Error('bin_window_superseded');
   const binX=unique(x.map(a=>a.publicKey.toBase58()));
   const binY=unique(y.map(a=>a.publicKey.toBase58()));
   if(!binX.length||!binY.length)throw Error('bin_arrays_missing_direction');
-  const bitmap=entry.sdk.binArrayBitmapExtension?.publicKey.toBase58()??null;
+  const bitmap=sdk.binArrayBitmapExtension?.publicKey.toBase58()??null;
   const all=unique([entry.candidate.address,...binX,...binY,
    ...(bitmap?[bitmap]:[])]);
-  for(const address of all){
-   if(entry.releases.has(address))continue;
-   this.feed.expectOwner(address,METEORA_DLMM);
-   entry.releases.set(address,this.feed.watch(address));
+  const newReleases=new Map<string,()=>void>();
+  try{
+   // Keep the old window live while the replacement's on-chain state is
+   // being verified. A slow or timed-out SDK reindex never tears it down.
+   for(const address of all)if(!entry.releases.has(address)){
+    this.feed.expectOwner(address,METEORA_DLMM);
+    newReleases.set(address,this.feed.watch(address));
+   }
+   if(!stillValid())throw Error('bin_window_superseded');
+   await this.feed.reconcile(all,'rpc_bootstrap',this.reindexDeadlineMs);
+   if(!stillValid())throw Error('bin_window_superseded');
+   for(const [address,release] of entry.releases)if(!all.includes(address)){
+    release();entry.releases.delete(address);
+   }
+   for(const [address,release] of newReleases)entry.releases.set(address,release);
+   newReleases.clear();
+   this.feed.setDependencies(ctxPrefix+entry.candidate.address,all);
+   entry.binX=binX;entry.binY=binY;entry.bitmap=bitmap;
+   entry.lastReindexAt=Date.now();entry.needsReindex=false;
+   this.verifiedAccountRefreshes++;
+  }finally{
+   for(const release of newReleases.values())release();
   }
-  for(const [key,release] of entry.releases)if(!all.includes(key)){
-   release();entry.releases.delete(key);
-  }
-  this.feed.setDependencies(ctxPrefix+entry.candidate.address,all);
-  entry.binX=binX;entry.binY=binY;entry.bitmap=bitmap;
-  await this.feed.reconcile(all,'rpc_bootstrap');
-  entry.lastReindexAt=Date.now();entry.needsReindex=false;
-  this.verifiedAccountRefreshes++;
  }
  private async bootstrap(candidate:Candidate){
   if(!this.running||this.entries.has(candidate.address)||this.pending.has(candidate.address))return;
