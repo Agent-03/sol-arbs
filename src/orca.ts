@@ -47,7 +47,7 @@ export function evaluateRoute(
  assumedCostUsd:number
 ):ArbitrageCandidate{
  const expected=BigInt(Math.round(sizeUsd*1e6));
- if(buy.venue===sell.venue||buy.pool===sell.pool)throw new Error('Route must cross distinct venues and pools');
+ if(buy.pool===sell.pool)throw new Error('Cycle legs must use distinct pool accounts');
  if(BigInt(buy.inputRaw)!==expected||sell.inputRaw!==buy.outputRaw)throw new Error('Non-contiguous route input/output');
  const grossRaw=BigInt(sell.outputRaw)-expected;
  const grossUsd=Number(grossRaw)/1e6;
@@ -129,6 +129,13 @@ export class OrcaMonitor{
    routeCandidates:[...this.state.routeCandidates],errors:[...this.state.errors]};
  }
  hasLocalPricing(pool:string):boolean{return this.local?.hasReadySnapshot(pool)??false;}
+ /** C3B hot-path adapter: never falls back to network/RPC. An unavailable
+  * exact-input reverse quote is a miss, not a fabricated profitable route.
+  */
+ quoteLocalExact(pool:string,direction:'USDC_TO_SOL'|'SOL_TO_USDC',amountRaw:bigint):OrcaQuote|null{
+  const q=this.local?.quoteExact(pool,direction,amountRaw);
+  return q?{...q,classification:'indicative_non_executable'}:null;
+ }
  requestReferenceValidation():{accepted:boolean;message:string}{
   const reject=(message:string)=>{
    this.validationRejectedRequests++;this.lastValidationRejection=message;
