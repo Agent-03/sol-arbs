@@ -13,7 +13,8 @@ test('explorer retains the screenshot-inspired live table interactions',()=>{
   'Route Estimates','Swap Quotes','Pool Coverage','Engine Activity',
   'Transactions','data-tab="routes"','data-tab="transactions"',
   'id="query"','id="filter"','id="size"','id="csv"',
-  'id="pagination"','data-sort','/api/explorer','/terminal'
+  'id="pagination"','data-sort','/api/explorer','/terminal',
+  'id="c1watched"','id="c1updates"','id="c1ready"','/api/market-data'
  ];
  for(const term of expected)assert.ok(explorerHtml.includes(term),'missing '+term);
 });
