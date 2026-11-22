@@ -104,6 +104,6 @@ export class AmmV4Monitor {
    this.state={status:errors.length?'partial_error':'ok',lastUpdatedAt:new Date().toISOString(),quotes,errors,poolCount:supported.length};
   }
  }
- start(){if(this.active)return;this.active=true;const loop=async()=>{if(!this.active)return;try{await this.scanOnce();}catch(e){this.state={...this.state,status:'partial_error',errors:[String(e)]};}if(this.active)this.timer=setTimeout(()=>{void loop();},this.intervalMs);};void loop();}
+ start(){if(this.active)return;this.active=true;const loop=async()=>{if(!this.active)return;try{await this.scanOnce();}catch(e){this.state={...this.state,status:'partial_error',errors:[String(e)]};}if(this.active)this.timer=setTimeout(()=>{void loop();},this.intervalMs);};if(this.state.lastUpdatedAt)this.timer=setTimeout(()=>{void loop();},this.intervalMs);else void loop();}
  stop(){this.active=false;if(this.timer)clearTimeout(this.timer);}
 }
