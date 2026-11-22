@@ -41,7 +41,7 @@ test('C3D radar retains diagnostics, empty states and safe token rendering',()=>
   'Pool state warming','SCANNER OFFLINE',
   'data-view="radar"','data-view="tokens"','data-view="coverage"',
   '/legacy','Not transaction-simulated',
-  'routeFiltered','copy','function esc'
+  'routeFiltered','copy','var esc=function'
  ].filter(x=>x!=='Not transaction-simulated')){
   assert.ok(explorerHtml.includes(text),'missing '+text);
  }
