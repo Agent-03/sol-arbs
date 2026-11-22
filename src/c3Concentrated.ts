@@ -1,3 +1,4 @@
+import {withRpcPriority} from './rpcPriority.js';
 import {Connection,PublicKey,Keypair} from '@solana/web3.js';
 import {AnchorProvider,Wallet} from '@coral-xyz/anchor';
 import {WhirlpoolContext,buildWhirlpoolClient,ParsableWhirlpool} from '@orca-so/whirlpools-sdk';
@@ -123,7 +124,7 @@ export class C3Concentrated{
   this.registryOrca=selected;
   if(!this.running)return;
   if(this.refreshing){this.orcaRegistryPending=true;return}
-  void this.discoverOrca();
+  void withRpcPriority('background',()=>this.discoverOrca());
  }
  /** Raydium CLMM candidate addresses are already validated by C3 graph discovery. */
  async setRaydiumCandidates(rows:ReadonlyArray<{address:string;tokenA:GraphAsset;tokenB:GraphAsset;liquidityUsd:number}>){
@@ -203,19 +204,19 @@ export class C3Concentrated{
    this.refreshing=false;
    if(this.running&&this.orcaRegistryPending){
     this.orcaRegistryPending=false;
-    void this.discoverOrca();
+    void withRpcPriority('background',()=>this.discoverOrca());
    }
   }
  }
  start(){
   if(this.running)return;
   this.running=true;
-  void this.discoverOrca();
+  void withRpcPriority('background',()=>this.discoverOrca());
   this.timer=setInterval(()=>{void this.discoverOrca()},this.opts.refreshMs);
   this.snapshotTimer=setInterval(()=>{
    if(this.snapshotRefreshing||!this.running)return;
    this.snapshotRefreshing=true;
-   void this.orca.refreshCachedSnapshots().then(()=>this.notify()).catch(error=>
+   void withRpcPriority('quotes',()=>this.orca.refreshCachedSnapshots()).then(()=>this.notify()).catch(error=>
     this.error('Orca snapshot verification: '+String(error))
    ).finally(()=>{this.snapshotRefreshing=false});
   },Math.min(8000,Math.max(2500,Math.floor(this.opts.maxAgeMs/2))));

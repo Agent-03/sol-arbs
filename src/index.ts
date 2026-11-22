@@ -53,6 +53,7 @@ async function main(){
   dlmmRpcDeadlineMs:config.c3d42DlmmRpcDeadlineMs,
   dlmmReindexDeadlineMs:config.c3d42DlmmReindexDeadlineMs,
   dlmmReindexConcurrency:config.c3d42DlmmReindexConcurrency,
+  dlmmBootstrapConcurrency:config.c3d43DlmmBootstrapConcurrency,
   maxPathChecks:config.c3GraphMaxPathChecks,maxResults:config.c3GraphMaxResults,
   minLiquidityUsd:config.c3dEnabled?config.c3dMinPoolLiquidityUsd:
    config.c3GraphMinLiquidityUsd,
@@ -124,7 +125,7 @@ async function main(){
     const raydium=engine.getRaydium().quotes;
     const clmm=engine.getClmm().quotes;
     send(200,{
-     mode:'READ_ONLY',observedAt:d.now,market:config.c3dEnabled?'dynamic wSOL/SPL':'SOL/USDC',phase:config.c3dEnabled?'C3D.4.2':d.phase,
+     mode:'READ_ONLY',observedAt:d.now,market:config.c3dEnabled?'dynamic wSOL/SPL':'SOL/USDC',phase:config.c3dEnabled?'C3D.4.3':d.phase,
      summary:{status:d.status,opportunities:d.opportunities,
       utility:d.discovery.utility,orca:d.orca,clmm:d.clmm,
       raydium:d.raydium,b5:d.b5,c1:d.c1,c2:d.c2,scan:d.scan,rpc:d.rpc,

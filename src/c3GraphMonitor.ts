@@ -1,3 +1,4 @@
+import {withRpcPriority} from './rpcPriority.js';
 import {PublicKey,type Connection,type AccountInfo} from '@solana/web3.js';
 import {decodeAmmV4AnyPair,decodeVault} from './ammV4.js';
 import {RAYDIUM_AMM_V4,RAYDIUM_CLMM} from './routes.js';
@@ -35,6 +36,7 @@ export type GraphMonitorOptions={
  dlmmRefreshBudget?:number;dlmmRefreshConcurrency?:number;
  dlmmRpcDeadlineMs?:number;dlmmReindexDeadlineMs?:number;
  dlmmReindexConcurrency?:number;
+ dlmmBootstrapConcurrency?:number;
 };
 export type GraphMonitorSnapshot=GraphEvaluation&{
  status:'disabled'|'discovering'|'warming'|'monitoring'|'partial_error'|'stopped';
@@ -155,7 +157,8 @@ export class C3GraphMonitor{
    refreshConcurrency:options.dlmmRefreshConcurrency??4,
    rpcDeadlineMs:options.dlmmRpcDeadlineMs,
    reindexDeadlineMs:options.dlmmReindexDeadlineMs,
-   reindexConcurrency:options.dlmmReindexConcurrency
+   reindexConcurrency:options.dlmmReindexConcurrency,
+   bootstrapConcurrency:options.dlmmBootstrapConcurrency
   },()=>this.scheduleEvaluation());
   if(!options.enabled)this.status='disabled';
  }
@@ -506,7 +509,7 @@ export class C3GraphMonitor{
    }
    for(const id of [...this.nodes.keys()])if(!wanted.has(id))this.detach(id);
    this.lastDiscoveryAt=new Date().toISOString();
-   await this.reconcile();
+   await withRpcPriority('quotes',()=>this.reconcile());
    this.status=this.nodes.size||clmmCandidates.length?'monitoring':'partial_error';
   }catch(error){this.note('C3D discovery: '+String(error));this.status='partial_error'}
   finally{this.refreshing=false;this.scheduleEvaluation()}
@@ -556,10 +559,10 @@ export class C3GraphMonitor{
    }
    this.scheduleEvaluation();
   });
-  await this.discover();
+  await withRpcPriority('background',()=>this.discover());
   if(!this.running)return;
-  this.discoveryTimer=setInterval(()=>{void this.discover()},this.options.refreshMs);
-  this.reconcileTimer=setInterval(()=>{void this.reconcile()},this.options.reconcileMs);
+  this.discoveryTimer=setInterval(()=>{void withRpcPriority('background',()=>this.discover())},this.options.refreshMs);
+  this.reconcileTimer=setInterval(()=>{void withRpcPriority('quotes',()=>this.reconcile())},this.options.reconcileMs);
  }
  stop(){
   this.running=false;

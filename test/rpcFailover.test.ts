@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {RpcProviderPool} from '../src/rpcFailover.js';
+import {withRpcPriority} from '../src/rpcPriority.js';
 
 const primary='https://primary.invalid/rpc?api-key=secret-test-primary';
 const secondary='https://secondary.invalid/v2/secret-test-secondary';
@@ -156,4 +157,25 @@ test('C3D dual active mode sends simultaneous reads to two independent RPC lanes
  assert.ok(calls.some(c=>c.url===secondary));
  assert.ok(calls.filter(c=>c.url===secondary).every(c=>c.auth===null));
  assert.equal(JSON.stringify(pool.snapshot()).includes('secret-test'),false);
+});
+
+test('C3D.4.3 async SDK priority survives awaits across both active RPC providers',async()=>{
+ const provider=new RpcProviderPool(primary,secondary,{
+  ...opts,maxConcurrent:2,backgroundMaxConcurrent:1
+ },(async()=>ok()) as typeof fetch,{
+  dualActive:true,secondaryOptions:{
+   ...opts,maxConcurrent:2,backgroundMaxConcurrent:1
+  }
+ });
+ await Promise.all([
+  withRpcPriority('quotes',async()=>{await Promise.resolve();return provider.fetch(primary)}),
+  withRpcPriority('background',async()=>{await Promise.resolve();return provider.fetch(primary)})
+ ]);
+ const r=provider.snapshot();
+ assert.equal(r.mode,'dual_active');
+ assert.equal(r.primary.priorityDispatches.quotes,1);
+ assert.equal(r.secondary?.priorityDispatches.background,1);
+ assert.equal(r.primary.backgroundMaxConcurrent,1);
+ assert.equal(r.secondary?.backgroundMaxConcurrent,1);
+ assert.equal(JSON.stringify(r).includes('secret-test'),false);
 });

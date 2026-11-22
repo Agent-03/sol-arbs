@@ -72,7 +72,7 @@ test('C3D.4 local DLMM and Orca readiness diagnostics surface in the radar',()=>
   'Meteora DLMM local quote readiness','id="dlmmTable"',
   'id="healthDlmm"','DLMM SDK ready / mapped',
   'graph&&graph.dlmm','dlrows.map','Fresh local SDK quote state',
-  'LIVE · C3D.4.2'
+  'LIVE · C3D.4.3'
  ])assert.ok(explorerHtml.includes(term),'missing '+term);
 });
 
@@ -80,7 +80,7 @@ test('C3D.4.1 radar exposes DLMM freshness, recovery and scheduler health',()=>{
  for(const label of ['id="dlmmCadence"','id="dlmmChecks"',
   'id="dlmmRecoveries"','id="dlmmOldest"','id="dlmmRefreshStatus"',
   'dl.refreshConcurrency','dl.refreshBudget','dl.reasonCounts',
-  'p.oldestAgeMs','p.refreshFailures','LIVE · C3D.4.2']){
+  'p.oldestAgeMs','p.refreshFailures','LIVE · C3D.4.3']){
   assert.ok(explorerHtml.includes(label),'C3D.4.1 missing '+label);
  }
 });
@@ -91,6 +91,18 @@ test('C3D.4.2 dashboard exposes physical timeout locks and recovery latency',()=
   'dl.outstandingRpcReads','dl.oldestOutstandingRpcMs','dl.rpcTimedOut',
   'dl.rpcLateSettled','dl.partialRefreshes','dl.refreshDurationMsP95',
   'dl.reindexInFlight','dl.skippedCapacity','p.continuousReadyMs',
-  'LIVE · C3D.4.2'
+  'LIVE · C3D.4.3'
+ ])assert.ok(explorerHtml.includes(term),'missing '+term);
+});
+
+test('C3D.4.3 shows prioritized RPC lanes and local recovery telemetry',()=>{
+ for(const term of [
+  'LIVE · C3D.4.3','id="dlmmPriorityStatus"',
+  'dl.bootstrapConcurrency','dl.bootstrapPhysicalInFlight',
+  'dl.windowShiftReindexes','dl.queueDeadlineExceeded',
+  'dl.transportDeadlineExceeded','dl.periodicReindexesRemoved',
+  'v.pendingByPriority','v.queueWaitMsP95','v.transportMsP95',
+  'v.pacingMsP95',
+  'v.backgroundMaxConcurrent'
  ])assert.ok(explorerHtml.includes(term),'missing '+term);
 });
