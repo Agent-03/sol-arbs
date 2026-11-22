@@ -80,6 +80,16 @@ export class RpcProviderPool {
   if(new URL(requestUrl(input)).toString()!==new URL(this.primaryUrl).toString()){
    throw new Error('RPC request target differs from configured primary endpoint');
   }
+  // Clone before the primary call in case the fetch input is a Request whose
+  // body would otherwise be consumed before failover.
+  const backupInput=this.inputForSecondary(input);
+  const headers=new Headers(init?.headers??(input instanceof Request?input.headers:undefined));
+  // Credentials for the primary provider must not be sent to a different host.
+  headers.delete('authorization');
+  headers.delete('proxy-authorization');
+  headers.delete('x-api-key');
+  headers.delete('cookie');
+  const backupInit:RequestInit={...init,headers};
   let primaryResponse:Response|undefined;
   let primaryError:unknown;
   if(!this.cooling(this.primary,this.primaryFailedUntil)){
@@ -101,7 +111,7 @@ export class RpcProviderPool {
    this.failovers++;
    this.lastFailoverAt=new Date().toISOString();
    try{
-    const response=await this.secondary.fetch(this.inputForSecondary(input),init);
+    const response=await this.secondary.fetch(backupInput,backupInit);
     if(!isFailoverStatus(response.status)){
      this.secondarySuccesses++;
      this.activeProvider='secondary';
@@ -116,11 +126,11 @@ export class RpcProviderPool {
     this.secondaryFailures++;
     this.secondaryFailedUntil=Date.now()+this.failedForMs;
     if(primaryResponse)return primaryResponse;
-    throw new Error('Both Solana RPC providers failed to serve this request',{cause:error});
+    throw new Error('Both Solana RPC providers failed to serve this request');
    }
   }
   if(primaryResponse)return primaryResponse;
-  if(primaryError)throw new Error('Primary RPC failed; backup RPC is cooling down',{cause:primaryError});
+  if(primaryError)throw new Error('Primary RPC failed; backup RPC is cooling down');
   return new Response(JSON.stringify({error:'Both RPC providers are cooling down'}),{
    status:503,headers:{'content-type':'application/json'}
   });
