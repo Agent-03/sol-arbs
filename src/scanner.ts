@@ -28,7 +28,7 @@ export class Scanner{
   const next={address,slot,observedAt,source,owner:info.owner.toBase58(),lamports:info.lamports,dataLength:info.data.length,dataHash};
   this.state.set(address,next);
   await this.record({kind:'account_update',...next});
-  console.log(JSON.stringify({event:'account_update',address,slot,source}));
+  if(process.env.LOG_ACCOUNT_UPDATES==='1')console.log(JSON.stringify({event:'account_update',address,slot,source}));
  }
  private async poll(){
   if(!this.running||this.pollInFlight)return;
