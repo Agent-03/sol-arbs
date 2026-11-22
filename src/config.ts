@@ -19,7 +19,7 @@ export function loadConfig():Config{
  const maxPools=positiveInteger('MAX_DISCOVERED_POOLS',20);
  if(maxPools>100)throw new Error('MAX_DISCOVERED_POOLS cannot exceed 100');
  const apiKey=process.env.JUPITER_API_KEY||undefined;
- return {rpcUrl,wsUrl,pools,maxPools,pollIntervalMs:positiveInteger('POLL_INTERVAL_MS',60000),staleAfterMs:positiveInteger('STALE_AFTER_MS',30000),port:positiveInteger('HEALTH_PORT',8787),dataDir:process.env.DATA_DIR||'./data',ammScanIntervalMs:positiveInteger('AMM_V4_SCAN_INTERVAL_MS',60000),orcaScanIntervalMs:positiveInteger('ORCA_SCAN_INTERVAL_MS',60000),
+ return {rpcUrl,wsUrl,pools,maxPools,pollIntervalMs:positiveInteger('POLL_INTERVAL_MS',60000),staleAfterMs:positiveInteger('STALE_AFTER_MS',120000),port:positiveInteger('HEALTH_PORT',8787),dataDir:process.env.DATA_DIR||'./data',ammScanIntervalMs:positiveInteger('AMM_V4_SCAN_INTERVAL_MS',60000),orcaScanIntervalMs:positiveInteger('ORCA_SCAN_INTERVAL_MS',60000),
   jupiter:{apiKey,sizesUsd:sizes(),intervalMs:positiveInteger('JUPITER_SCAN_INTERVAL_MS',60000),
    minRequestSpacingMs:Math.max(apiKey?500:2200,positiveInteger('JUPITER_REQUEST_SPACING_MS',apiKey?500:2200)),
    assumedCostUsd:nonNegativeNumber('JUPITER_ASSUMED_COST_USD',0.02)}};
