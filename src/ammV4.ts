@@ -15,7 +15,8 @@ export type AmmV4Quote={
  reserveInRaw:string;reserveOutRaw:string;
  classification:'indicative_non_executable';
 };
-export type AmmV4Snapshot={status:'idle'|'scanning'|'ok'|'partial_error';lastUpdatedAt?:string;quotes:AmmV4Quote[];errors:string[];poolCount:number;};
+export type AmmV4Snapshot={status:'idle'|'scanning'|'ok'|'partial_error';lastUpdatedAt?:string;quotes:AmmV4Quote[];errors:string[];poolCount:number;
+ progress?:{totalPools:number;completedPools:number;quotesProduced:number;currentPool?:string};};
 const key=(b:Buffer,o:number)=>new PublicKey(b.subarray(o,o+32)).toBase58();
 const u64=(b:Buffer,o:number)=>b.readBigUInt64LE(o);
 const ceilDiv=(n:bigint,d:bigint)=>(n+d-1n)/d;
@@ -77,10 +78,12 @@ export class AmmV4Monitor {
   if(this.busy)return;
   this.busy=true;
   const supported=this.pools.filter(p=>p.owner===RAYDIUM_AMM_V4&&p.venue==='raydium');
-  this.state={...this.state,status:'scanning',poolCount:supported.length};
+  this.state={...this.state,status:'scanning',poolCount:supported.length,progress:{totalPools:supported.length,completedPools:0,quotesProduced:0}};
   const quotes:AmmV4Quote[]=[],errors:string[]=[];
   try{
+   let completed=0;
    for(const pool of supported){
+    this.state={...this.state,progress:{totalPools:supported.length,completedPools:completed,quotesProduced:quotes.length,currentPool:pool.address}};
     try{
      const poolKey=new PublicKey(pool.address);
      const snapshot=await this.conn.getMultipleAccountsInfoAndContext([poolKey],'confirmed');
@@ -98,10 +101,11 @@ export class AmmV4Monitor {
       quotes.push(quoteV4(state,base,quote,raw,snapshot.context.slot,vaults.context.slot));
      }
     }catch(err){errors.push(`${pool.address}: ${String(err)}`);}
+    finally{completed++;this.state={...this.state,progress:{totalPools:supported.length,completedPools:completed,quotesProduced:quotes.length}};}
    }
   }finally{
    this.busy=false;
-   this.state={status:errors.length?'partial_error':'ok',lastUpdatedAt:new Date().toISOString(),quotes,errors,poolCount:supported.length};
+   this.state={status:errors.length?'partial_error':'ok',lastUpdatedAt:new Date().toISOString(),quotes,errors,poolCount:supported.length,progress:{totalPools:supported.length,completedPools:supported.length,quotesProduced:quotes.length}};
   }
  }
  start(){if(this.active)return;this.active=true;const loop=async()=>{if(!this.active)return;try{await this.scanOnce();}catch(e){this.state={...this.state,status:'partial_error',errors:[String(e)]};}if(this.active)this.timer=setTimeout(()=>{void loop();},this.intervalMs);};if(this.state.lastUpdatedAt)this.timer=setTimeout(()=>{void loop();},this.intervalMs);else void loop();}
